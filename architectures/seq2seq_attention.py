@@ -2,6 +2,9 @@ import torch
 import torch.nn as nn
 import random
 
+
+english = 12
+
 class Encoder(nn.Module):
     def __init__(self, input_size, embedding_size, hidden_size, num_layers, p):
         super().__init__()
