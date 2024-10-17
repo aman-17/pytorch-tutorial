@@ -30,11 +30,11 @@ class SimpleTokenizerV1:
 tokenizer = SimpleTokenizerV1(vocab)
 text = """"It's the last he painted, you know," Mrs. Gisburn said pard"""
 ids = tokenizer.encode(text)
-# print(ids)
+print(ids)
 # print(tokenizer.decode(ids))
 
-text1 = "Hello, do you like tea?"
-text2 = "In the sunlit terraces of the palace."
-text = " <|endoftext|> ".join((text1, text2))
-print(text)
-print(tokenizer.decode(tokenizer.encode(text)))
+# text1 = "Hello, do you like tea?"
+# text2 = "In the sunlit terraces of the palace."
+# text = " <|endoftext|> ".join((text1, text2))
+# print(text)
+# print(tokenizer.decode(tokenizer.encode(text)))
