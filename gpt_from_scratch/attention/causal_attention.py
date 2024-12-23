@@ -47,6 +47,14 @@ class SelfAttention_v2(nn.Module):
 # print(masked_simple_norm)
 
 # #trick 2
+# torch.manual_seed(789)
+# sa_v2 = SelfAttention_v2(d_in, d_out)
+# queries = sa_v2.W_query(inputs) #A
+# keys = sa_v2.W_key(inputs)
+# attn_scores = queries @ keys.T
+# attn_weights = torch.softmax(attn_scores / keys.shape[-1]**0.5, dim=1)
+# # print(attn_weights)
+# context_length = attn_scores.shape[0]
 # mask = torch.triu(torch.ones(context_length, context_length), diagonal=1)
 # masked = attn_scores.masked_fill(mask.bool(),-torch.inf)
 # print(masked)

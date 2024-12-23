@@ -11,7 +11,7 @@ inputs = torch.tensor(
 query = inputs[1] #A
 attn_scores_2 = torch.empty(inputs.shape[0])
 for i, x_i in enumerate(inputs):
-  print(i,x_i)
+  print(i, x_i)
   attn_scores_2[i] = torch.dot(x_i, query)
 print("Attention scores:", attn_scores_2)
 
@@ -34,11 +34,12 @@ print("Attention scores:", attn_scores_2)
 attn_weights_2 = torch.softmax(attn_scores_2, dim=0)
 print("Attention weights:", attn_weights_2)
 
-query = inputs[1] # 2nd input token is the query
+query = inputs[1]
 context_vec_2 = torch.zeros(query.shape)
-for i,x_i in enumerate(inputs):
-  context_vec_2 += attn_weights_2[i]*x_i
-print(context_vec_2)
+for i, x_i in enumerate(inputs):
+  context_vec_2 += attn_weights_2[i] * x_i
+  # print(attn_weights_2[i], x_i)
+print("Context vector: ", context_vec_2)
 
 # attn_scores = torch.empty(6, 6)
 # for i, x_i in enumerate(inputs):
@@ -47,7 +48,10 @@ print(context_vec_2)
 # print(attn_scores)
 
 attn_scores = inputs @ inputs.T
-print(attn_scores)
+# print(attn_scores)
 
 attn_weights = torch.softmax(attn_scores, dim=1)
-print(attn_weights)
+# print(attn_weights)
+
+all_context_vecs = attn_weights @ inputs
+print(all_context_vecs)
