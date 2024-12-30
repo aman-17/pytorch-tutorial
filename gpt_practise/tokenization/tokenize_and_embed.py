@@ -30,7 +30,7 @@ def create_dataloader_v1(txt, batch_size=4,
         dataset, batch_size=batch_size, shuffle=shuffle, drop_last=drop_last)
     return dataloader
 
-with open("gpt_from_scratch/tokenization/the-verdict.txt", "r", encoding="utf-8") as f:
+with open("gpt_practise/tokenization/the-verdict.txt", "r", encoding="utf-8") as f:
     raw_text = f.read()
 dataloader = create_dataloader_v1(
     raw_text, batch_size=1, max_length=4, stride=1, shuffle=False)

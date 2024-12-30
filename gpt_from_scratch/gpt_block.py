@@ -50,10 +50,8 @@ def generate_text_simple(model: nn.Module,
         torch.Tensor: Generated token indices
     """
     for _ in range(max_new_tokens):
-        # Get the context window
         idx_cond = idx[:, -context_size:]
         
-        # Generate next token
         with torch.no_grad():
             logits = model(idx_cond)
             logits = logits[:, -1, :]  # Focus on last token
@@ -79,41 +77,20 @@ GPT_CONFIG_124M = {
 import tiktoken
 
 tokenizer = tiktoken.get_encoding("gpt2")
-# batch = []
-# txt1 = "Every effort moves you"
-# txt2 = "Every day holds a"
-# batch.append(torch.tensor(tokenizer.encode(txt1)))
-# batch.append(torch.tensor(tokenizer.encode(txt2)))
-# batch = torch.stack(batch, dim=0)
-
-# torch.manual_seed(123)
-# model = GPTModel(GPT_CONFIG_124M)
-# output = model(batch)
-# print("Input batch:", batch)
-# print("Output shape:", output.shape)
-# print("Output:", output)
-
-
 start_context = "Hello, I am"
 encoded = tokenizer.encode(start_context)
 print("encoded:", encoded)
 encoded_tensor = torch.tensor(encoded).unsqueeze(0)
 print("encoded_tensor.shape:", encoded_tensor.shape)
-
-# Model evaluation mode
 model = GPTModel(GPT_CONFIG_124M)
 model.eval()
-
-# Generate text
 with torch.no_grad():
     out = generate_text_simple(
         model=model,
         idx=encoded_tensor,
         max_new_tokens=6,
         context_size=GPT_CONFIG_124M["context_length"]
-    )
-
-# Print results    
+    )   
 print(f"Output: {out}")
 print(f"Output length: {len(out[0])}")
 
