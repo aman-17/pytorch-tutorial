@@ -21,7 +21,6 @@ class TransformerBlock(nn.Module):
         self.drop_resid = nn.Dropout(cfg["drop_rate"])
 
     def forward(self, x):
-        #A
         shortcut = x
         x = self.norm1(x)
         x = self.att(x)
