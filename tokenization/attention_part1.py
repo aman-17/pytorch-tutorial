@@ -33,7 +33,7 @@ print("Attention scores:", attn_scores_2)
 attn_weights_2 = torch.softmax(attn_scores_2, dim=0)
 print("Attention weights:", attn_weights_2)
 
-query = inputs[1] # 2nd input token is the query
+query = inputs[1] 
 context_vec_2 = torch.zeros(query.shape)
 for i,x_i in enumerate(inputs):
   context_vec_2 += attn_weights_2[i]*x_i
