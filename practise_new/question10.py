@@ -30,18 +30,19 @@ def elu_feature_map(x):
     """ELU + 1 feature map to ensure positive values"""
     # TODO: Implement φ(x) = ELU(x) + 1
     # This ensures all values are positive for the kernel method
-    pass
+    return F.elu(x) + 1
 
 class LinearAttention(nn.Module):
     """Linear attention mechanism with O(n) complexity"""
     def __init__(self, dim, heads=8, causal=False):
         super(LinearAttention, self).__init__()
-        # TODO: Initialize linear attention parameters
-        # - dim: model dimension
-        # - heads: number of attention heads
-        # - causal: whether to use causal masking
-        pass
-    
+        self.heads = heads
+        self.causal = causal
+
+        self.q_proj = nn.Linear(dim, dim, bias=False)
+        self.k_proj = nn.Linear(dim, dim, bias=False)
+        self.v_proj = nn.Linear(dim, dim, bias=False)
+
     def forward(self, x, mask=None):
         """
         Args:
@@ -52,18 +53,53 @@ class LinearAttention(nn.Module):
         """
         # TODO: Implement linear attention forward pass
         # 1. Compute Q, K, V projections
+        batch_size, seq_len, _ = x.shape
+
+        q = self.q_proj(x).view(batch_size, seq_len, self.heads, -1)
+        k = self.k_proj(x).view(batch_size, seq_len, self.heads, -1)
+        v = self.v_proj(x).view(batch_size, seq_len, self.heads, -1)
+
+        q = q.transpose(1, 2) 
+        k = k.transpose(1, 2) 
+        v = v.transpose(1, 2) 
         # 2. Apply feature maps φ and ψ
-        # 3. Compute linear attention efficiently
+        q = elu_feature_map(q)
+        k = elu_feature_map(k)
+        v = elu_feature_map(v)
+
+
         # 4. Handle causal masking if needed
         # 5. Apply output projection
         pass
     
     def causal_linear_attention(self, q, k, v):
-        """Efficient causal linear attention using cumulative sums"""
-        # TODO: Implement causal version using running sums
-        # Use the associative property to compute attention causally
-        # without materializing the full attention matrix
-        pass
+        """Efficient causal linear attention using running sums"""
+        batch_size, heads, seq_len, head_dim = q.shape
+        
+        # Initialize running sums - this is the key for O(n) complexity
+        kv_sum = torch.zeros(batch_size, heads, head_dim, head_dim, device=q.device)
+        k_sum = torch.zeros(batch_size, heads, head_dim, device=q.device)
+        
+        outputs = []
+        
+        for i in range(seq_len):
+            # Current query
+            q_i = q[:, :, i]  # (batch, heads, head_dim)
+            k_i = k[:, :, i]  # (batch, heads, head_dim)
+            v_i = v[:, :, i]  # (batch, heads, head_dim)
+            
+            # Update running sums (O(1) operation!)
+            kv_sum += k_i.unsqueeze(-1) @ v_i.unsqueeze(-2)  # outer product
+            k_sum += k_i
+            
+            # Compute attention for current position
+            numerator = q_i.unsqueeze(-2) @ kv_sum  # (batch, heads, 1, head_dim)
+            denominator = (q_i * k_sum).sum(dim=-1, keepdim=True)  # (batch, heads, 1)
+            
+            output_i = numerator.squeeze(-2) / (denominator + 1e-8)
+            outputs.append(output_i)
+        
+        return torch.stack(outputs, dim=2)  # (batch, heads, seq_len, head_dim)
 
 class LinearTransformerBlock(nn.Module):
     """Transformer block with linear attention"""
@@ -102,12 +138,35 @@ class StandardAttention(nn.Module):
     """Standard quadratic attention for comparison"""
     def __init__(self, dim, heads=8, causal=False):
         super(StandardAttention, self).__init__()
-        # TODO: Implement standard attention for comparison
-        pass
+        self.heads = heads
+        self.causal = causal
+        self.dim = dim
+        self.q_proj = nn.Linear(dim, dim, bias=False)
+        self.k_proj = nn.Linear(dim, dim, bias=False)
+        self.v_proj = nn.Linear(dim, dim, bias=False)
+        self.out_proj = nn.Linear(dim, dim, bias=False)
     
     def forward(self, x, mask=None):
-        # TODO: Standard attention forward pass
-        pass
+        batch_size, seq_len, _ = x.shape
+
+        q = self.q_proj(x).view(batch_size, seq_len, self.heads, -1)
+        k = self.k_proj(x).view(batch_size, seq_len, self.heads, -1)
+        v = self.v_proj(x).view(batch_size, seq_len, self.heads, -1)
+
+        q = q.transpose(1, 2)
+        k = k.transpose(1, 2)
+        v = v.transpose(1, 2)
+
+        scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.dim)
+        
+        if self.causal and mask is not None:
+            scores.masked_fill_(mask == 0, float('-inf'))
+
+        attn_weights = F.softmax(scores, dim=-1)
+        attn_output = torch.matmul(attn_weights, v)
+        attn_output = attn_output.transpose(1, 2).contiguous()
+        attn_output = attn_output.view(batch_size, seq_len, -1)
+        return self.out_proj(attn_output)
 
 def compare_attention_complexity():
     """Compare computational complexity of linear vs standard attention"""
