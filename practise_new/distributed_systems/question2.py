@@ -18,7 +18,8 @@ Tasks:
 
 import torch
 import torch.nn as nn
-from torch.distributed.pipeline.sync import Pipe
+
+from torch.distributed.pipelining import pipeline, ScheduleGPipe, SplitPoint
 import torch.distributed as dist
 from typing import List, Dict, Any
 import time
@@ -39,11 +40,16 @@ class TransformerBlock(nn.Module):
         self.dropout = nn.Dropout(dropout)
     
     def forward(self, x):
-        # TODO: Implement transformer block
-        # 1. Self-attention with residual connection
-        # 2. Layer normalization
-        # 3. Feed-forward with residual connection
-        pass
+        shortcut = x
+        x=self.norm1(x)
+        x, _ = self.attention(x)
+        x = self.dropout(x)
+        x = shortcut + x
+        shortcut = x
+        x = self.norm2(x)
+        x = self.ffn(x)
+        x = self.dropout(x)
+        return shortcut + x
 
 class PipelineTransformer(nn.Module):
     def __init__(self, vocab_size, d_model, n_layers, n_heads, max_seq_len=2048):
@@ -68,7 +74,16 @@ class PipelineTransformer(nn.Module):
     def forward(self, input_ids):
         # TODO: Implement forward pass for pipeline
         # Note: This will be modified when creating pipeline partitions
-        pass
+        batch_size, seq_len = input_ids.shape
+        tok_embeds = self.embedding(input_ids)
+        pos_ids = torch.arange(0, seq_len, device=input_ids.device, dtype=torch.long)
+        pos_embeds = self.pos_embedding(pos_ids).unsqueeze(0)
+        x = tok_embeds + pos_embeds
+        for layer in self.layers:
+            x = layer(x)
+        x = self.ln_f(x)
+        logits = self.output_head(x)
+        return logits
 
 class PipelinePartitioner:
     """Handles model partitioning across devices"""
@@ -78,6 +93,7 @@ class PipelinePartitioner:
         self.devices = devices
         self.balance_strategy = balance_strategy
         self.partitions = []
+        self.world_size = len(devices)
     
     def create_partitions(self) -> List[nn.Sequential]:
         """
@@ -86,17 +102,46 @@ class PipelinePartitioner:
         Returns:
             List of nn.Sequential modules, one per device
         """
-        # TODO: Implement model partitioning
-        # 1. Analyze model structure and parameter counts
-        # 2. Decide layer assignment per device
-        # 3. Create Sequential modules for each partition
-        # 4. Handle embedding and output layers
+        partitions = []
+        total_layers = len(self.model.layers)
+        layers_per_device = total_layers // self.world_size
         
-        # Strategy options:
-        # - Uniform: Equal number of layers per device
-        # - Balanced: Balance by parameter count/memory
-        # - Custom: Manual specification
-        pass
+        # First device gets embedding + some transformer layers
+        first_partition = []
+        first_partition.append(('embedding', self.model.embedding))
+        first_partition.append(('pos_embedding', self.model.pos_embedding))
+        
+        # Add transformer layers to first device
+        for i in range(layers_per_device):
+            first_partition.append((f'layer_{i}', self.model.layers[i]))
+        
+        partitions.append(nn.Sequential(dict(first_partition)))
+        
+        # Middle devices get transformer layers only
+        for device_idx in range(1, self.world_size - 1):
+            start_layer = device_idx * layers_per_device
+            end_layer = (device_idx + 1) * layers_per_device
+            
+            device_layers = []
+            for i in range(start_layer, end_layer):
+                device_layers.append((f'layer_{i}', self.model.layers[i]))
+            
+            partitions.append(nn.Sequential(dict(device_layers)))
+        
+        # Last device gets remaining layers + output head
+        if self.world_size > 1:
+            last_partition = []
+            start_layer = (self.world_size - 1) * layers_per_device
+            
+            for i in range(start_layer, total_layers):
+                last_partition.append((f'layer_{i}', self.model.layers[i]))
+            
+            last_partition.append(('ln_f', self.model.ln_f))
+            last_partition.append(('output_head', self.model.output_head))
+            
+            partitions.append(nn.Sequential(dict(last_partition)))
+        
+        return partitions
     
     def balance_by_parameters(self) -> Dict[int, List[str]]:
         """Balance partitions by parameter count"""
@@ -128,18 +173,50 @@ class PipelineScheduler:
         
         Args:
             schedule_type: '1f1b' (1-forward-1-backward) or 'gpipe'
+            
+        Returns:
+            List of (stage_id, microbatch_id, operation) tuples
         """
-        # TODO: Implement pipeline scheduling
-        # 1. 1F1B: Interleave forward and backward passes
-        # 2. GPipe: All forwards, then all backwards
-        # 3. Calculate bubble time for each strategy
-        pass
+        schedule = []
+        
+        if schedule_type == 'gpipe':
+            # GPipe: All forwards first, then all backwards
+            # Forward phase
+            for mb in range(self.n_microbatches):
+                for stage in range(self.n_stages):
+                    schedule.append((stage, mb, 'forward'))
+            
+            # Backward phase  
+            for mb in range(self.n_microbatches - 1, -1, -1):
+                for stage in range(self.n_stages - 1, -1, -1):
+                    schedule.append((stage, mb, 'backward'))
+        
+        elif schedule_type == '1f1b':
+            # 1F1B: Interleave forward and backward
+            # Warmup phase: fill pipeline with forwards
+            for mb in range(min(self.n_microbatches, self.n_stages)):
+                for stage in range(mb + 1):
+                    schedule.append((stage, mb, 'forward'))
+            
+            # Steady state: 1 forward, 1 backward per stage
+            for mb in range(self.n_stages, self.n_microbatches):
+                for stage in range(self.n_stages):
+                    schedule.append((stage, mb, 'forward'))
+                    if mb >= self.n_stages:
+                        schedule.append((stage, mb - self.n_stages, 'backward'))
+            
+            # Cooldown: drain pipeline with backwards
+            for mb in range(max(0, self.n_microbatches - self.n_stages), self.n_microbatches):
+                for stage in range(self.n_stages - 1, -1, -1):
+                    schedule.append((stage, mb, 'backward'))
+        
+        self.schedule = schedule
+        return schedule
     
     def calculate_bubble_time(self) -> float:
         """Calculate pipeline bubble time"""
-        # TODO: Calculate bubble time
         # Bubble time = (n_stages - 1) / n_microbatches * 100%
-        pass
+        return (self.n_stages - 1) / self.n_microbatches
 
 class MicroBatchManager:
     """Manages micro-batch creation and processing"""
@@ -272,27 +349,52 @@ def compare_pipeline_strategies():
 
 def main():
     """Main function to test pipeline parallelism"""
-    # TODO: Implement main testing function
-    # 1. Create large transformer model
-    # 2. Setup pipeline across multiple GPUs
-    # 3. Test training with different configurations
-    # 4. Profile and optimize performance
-    
     # Model configuration
     vocab_size = 50000
-    d_model = 4096
-    n_layers = 48  # Large model that needs pipeline parallelism
-    n_heads = 32
-    seq_len = 2048
+    d_model = 512  # Smaller for demo
+    n_layers = 12  # 12 layers across 4 GPUs = 3 layers per GPU
+    n_heads = 8
+    seq_len = 256
     batch_size = 32
     
     # Pipeline configuration
     devices = ['cuda:0', 'cuda:1', 'cuda:2', 'cuda:3']
     n_microbatches = 8
     
-    print("TODO: Implement pipeline parallelism testing")
     print(f"Model: {n_layers} layers, {d_model} dimensions")
     print(f"Pipeline: {len(devices)} stages, {n_microbatches} micro-batches")
+    
+    # Create model
+    model = PipelineTransformer(vocab_size, d_model, n_layers, n_heads)
+    
+    # Test partitioning
+    partitioner = PipelinePartitioner(model, devices)
+    partitions = partitioner.create_partitions()
+    
+    print(f"\nPartitions created: {len(partitions)}")
+    for i, partition in enumerate(partitions):
+        param_count = sum(p.numel() for p in partition.parameters())
+        print(f"  Device {i}: {len(partition)} modules, {param_count:,} parameters")
+    
+    # Test scheduling
+    scheduler = PipelineScheduler(n_microbatches, len(devices))
+    
+    # Compare scheduling strategies
+    for schedule_type in ['gpipe', '1f1b']:
+        schedule = scheduler.create_schedule(schedule_type)
+        bubble_time = scheduler.calculate_bubble_time()
+        
+        print(f"\n{schedule_type.upper()} Schedule:")
+        print(f"  Total operations: {len(schedule)}")
+        print(f"  Bubble time: {bubble_time:.2%}")
+        
+        # Show first few operations
+        print("  First 10 operations:")
+        for i, (stage, mb, op) in enumerate(schedule[:10]):
+            print(f"    {i+1}: Stage {stage}, Microbatch {mb}, {op}")
+        
+        if len(schedule) > 10:
+            print(f"    ... and {len(schedule) - 10} more operations")
 
 if __name__ == "__main__":
     main()

@@ -19,6 +19,7 @@ Tasks:
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.optim import AdamW
 import os
@@ -44,7 +45,17 @@ class TransformerBlock(nn.Module):
         # 2. Layer normalization
         # 3. Feed-forward with residual connection
         # 4. Handle attention masks properly
-        pass
+        shortcut = x
+        x = self.norm1(x)
+        x, _ = self.attention(x, attn_mask=mask)
+        x = self.dropout(x)
+        x = x + shortcut
+        shortcut = x
+        x = self.norm2(x)
+        x = self.ffn(x)
+        x = self.dropout(x)
+        x = x + shortcut
+        return x
 
 class LargeTransformer(nn.Module):
     """7B parameter transformer model for distributed training"""
@@ -68,7 +79,17 @@ class LargeTransformer(nn.Module):
         # 1. Token embeddings + positional embeddings
         # 2. Pass through transformer layers
         # 3. Final layer norm and output projection
-        pass
+        batch_size, seq_len = input_ids.shape
+        tok_embeds = self.embedding(input_ids)
+        pos_ids = torch.arange(0, seq_len, device=input_ids.device, dtype=torch.long)
+        pos_embeds = self.pos_embedding(pos_ids).unsqueeze(0)
+        x = tok_embeds + pos_embeds
+        x = self.dropout(x)
+        for layer in self.layers:
+            x = layer(x, mask=attention_mask)
+        x = self.ln_f(x)
+        logits = self.output_head(x)
+        return logits
 
 def setup_ddp_training(rank, world_size, backend='nccl'):
     """
@@ -84,76 +105,148 @@ def setup_ddp_training(rank, world_size, backend='nccl'):
     # 2. Initialize process group
     # 3. Set device for current rank
     # 4. Handle error cases and cleanup
-    pass
+    os.environ['MASTER_ADDR'] = 'localhost'
+    os.environ['MASTER_PORT'] = '12355'
+    dist.init_process_group(backend, rank=rank, world_size=world_size)
+    torch.cuda.set_device(rank)
 
 class DistributedTrainer:
     def __init__(self, model, rank, world_size, gradient_accumulation_steps=4):
         self.rank = rank
         self.world_size = world_size
         self.gradient_accumulation_steps = gradient_accumulation_steps
+        self.step_count = 0
         
-        # TODO: Initialize distributed training components
-        # 1. Wrap model with DDP
-        # 2. Setup optimizer with proper learning rate scaling
-        # 3. Initialize gradient clipping
-        # 4. Setup learning rate scheduler
-        self.model = None  # Replace with DDP wrapped model
-        self.optimizer = None
-        self.scheduler = None
+        # Initialize distributed training components
+        device = torch.device(f'cuda:{rank}')
+        model = model.to(device)
+        self.model = DDP(model, device_ids=[rank])
         
+        # Setup optimizer with proper learning rate scaling
+        base_lr = 1e-4
+        scaled_lr = self.scale_learning_rate(base_lr)
+        self.optimizer = AdamW(self.model.parameters(), lr=scaled_lr)
+        self.scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(self.optimizer, T_0=10, T_mult=2)
+
     def scale_learning_rate(self, base_lr):
         """Scale learning rate for distributed training"""
         # TODO: Implement learning rate scaling strategies
         # 1. Linear scaling: lr = base_lr * world_size
         # 2. Sqrt scaling: lr = base_lr * sqrt(world_size)
         # 3. Consider warmup strategies
-        pass
+        return base_lr * self.world_size
     
     def sync_gradients(self):
         """Synchronize gradients across all processes"""
-        # TODO: Implement gradient synchronization
-        # 1. Ensure all processes have computed gradients
-        # 2. Handle gradient accumulation properly
-        # 3. Use DDP's automatic synchronization
-        pass
+        # DDP automatically synchronizes gradients during backward pass
+        # We just need to ensure all processes are synchronized
+        torch.cuda.synchronize()
+        
+        # Apply gradient clipping
+        self.clip_gradients_distributed()
+        
+        # Update parameters
+        self.optimizer.step()
+        self.optimizer.zero_grad()
+        self.scheduler.step()
+
     
     def clip_gradients_distributed(self, max_norm=1.0):
         """Clip gradients across all distributed processes"""
-        # TODO: Implement distributed gradient clipping
-        # 1. Compute gradient norm across all processes
-        # 2. Use dist.all_reduce to get global norm
-        # 3. Apply clipping based on global norm
-        pass
+        # Compute local gradient norm
+        local_norm = 0.0
+        for param in self.model.parameters():
+            if param.grad is not None:
+                local_norm += param.grad.data.norm(2).item() ** 2
+        local_norm = local_norm ** 0.5
+        
+        # Convert to tensor for all_reduce
+        norm_tensor = torch.tensor(local_norm ** 2, device=f'cuda:{self.rank}')
+        
+        # Reduce across all processes to get global norm
+        dist.all_reduce(norm_tensor, op=dist.ReduceOp.SUM)
+        global_norm = (norm_tensor.item() ** 0.5)
+        
+        # Apply clipping based on global norm
+        clip_coef = max_norm / (global_norm + 1e-6)
+        if clip_coef < 1:
+            for param in self.model.parameters():
+                if param.grad is not None:
+                    param.grad.data.mul_(clip_coef)
     
     def training_step(self, batch, accumulate_grad=True):
         """Single training step with gradient accumulation"""
-        # TODO: Implement training step
-        # 1. Forward pass
-        # 2. Compute loss (scale by accumulation steps)
-        # 3. Backward pass
-        # 4. Handle gradient accumulation
-        # 5. Synchronize gradients when needed
-        # 6. Apply gradient clipping
-        # 7. Optimizer step and zero gradients
-        pass
-    
+        # Move batch to device
+        device = f'cuda:{self.rank}'
+        for key in batch:
+            batch[key] = batch[key].to(device)
+        
+        # Forward pass
+        outputs = self.model(batch['input_ids'], attention_mask=batch['attention_mask'])
+        loss = F.cross_entropy(outputs.view(-1, outputs.size(-1)), batch['labels'].view(-1))
+        
+        # Scale loss for gradient accumulation
+        if accumulate_grad:
+            loss = loss / self.gradient_accumulation_steps
+        
+        # Backward pass
+        loss.backward()
+        
+        self.step_count += 1
+        
+        # Synchronize and update when accumulation is complete
+        if self.step_count % self.gradient_accumulation_steps == 0:
+            self.sync_gradients()
+        
+        return loss.item()
+
     def save_checkpoint_distributed(self, epoch, step, loss):
         """Save checkpoint in distributed setting"""
-        # TODO: Implement distributed checkpointing
-        # 1. Only rank 0 should save the checkpoint
-        # 2. Save model state dict (unwrap DDP)
-        # 3. Save optimizer and scheduler states
-        # 4. Include training metadata
-        pass
+        # Only rank 0 should save the checkpoint
+        if self.rank == 0:
+            checkpoint = {
+                "epoch": epoch,
+                "step": step,
+                "loss": loss,
+                "model_state_dict": self.model.module.state_dict(),  # Unwrap DDP
+                "optimizer_state_dict": self.optimizer.state_dict(),
+                "scheduler_state_dict": self.scheduler.state_dict(),
+                "world_size": self.world_size,
+                "gradient_accumulation_steps": self.gradient_accumulation_steps
+            }
+            
+            checkpoint_path = f"checkpoint_epoch_{epoch}_step_{step}.pt"
+            torch.save(checkpoint, checkpoint_path)
+            print(f"Checkpoint saved: {checkpoint_path}")
+        
+        # Synchronize all processes
+        dist.barrier()
     
     def load_checkpoint_distributed(self, checkpoint_path):
         """Load checkpoint in distributed setting"""
-        # TODO: Implement distributed checkpoint loading
-        # 1. Load checkpoint on all ranks
-        # 2. Handle model state dict loading for DDP
-        # 3. Restore optimizer and scheduler states
-        # 4. Ensure synchronization across ranks
-        pass
+        # Load checkpoint on all ranks
+        map_location = f'cuda:{self.rank}'
+        checkpoint = torch.load(checkpoint_path, map_location=map_location)
+        
+        # Load model state dict (DDP automatically handles the module prefix)
+        self.model.module.load_state_dict(checkpoint["model_state_dict"])
+        
+        # Restore optimizer and scheduler states
+        self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        self.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+        
+        # Restore training metadata
+        epoch = checkpoint["epoch"]
+        step = checkpoint["step"]
+        loss = checkpoint["loss"]
+        
+        # Ensure synchronization across ranks
+        dist.barrier()
+        
+        if self.rank == 0:
+            print(f"Checkpoint loaded: epoch {epoch}, step {step}, loss {loss:.4f}")
+        
+        return epoch, step, loss
 
 def create_dummy_data(batch_size, seq_len, vocab_size):
     """Create dummy training data"""
@@ -164,12 +257,22 @@ def create_dummy_data(batch_size, seq_len, vocab_size):
 
 def main():
     """Main training function"""
-    # TODO: Implement main training loop
-    # 1. Parse command line arguments (rank, world_size, etc.)
-    # 2. Setup distributed environment
-    # 3. Create model and trainer
-    # 4. Training loop with logging
-    # 5. Cleanup
+    import argparse
+    
+    # Parse command line arguments
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--rank', type=int, default=0, help='Rank of current process')
+    parser.add_argument('--world-size', type=int, default=1, help='Total number of processes')
+    parser.add_argument('--epochs', type=int, default=10, help='Number of training epochs')
+    parser.add_argument('--save-interval', type=int, default=1000, help='Save checkpoint every N steps')
+    args = parser.parse_args()
+    
+    # Get rank and world_size from environment if using torchrun
+    rank = int(os.environ.get('LOCAL_RANK', args.rank))
+    world_size = int(os.environ.get('WORLD_SIZE', args.world_size))
+    
+    # Setup distributed environment
+    setup_ddp_training(rank, world_size)
     
     # Hyperparameters
     vocab_size = 50000
@@ -178,11 +281,53 @@ def main():
     n_heads = 32
     batch_size = 4  # Per GPU batch size
     seq_len = 2048
-    learning_rate = 1e-4
     
-    print("TODO: Implement distributed training main function")
+    # Create model
+    model = LargeTransformer(vocab_size, d_model, n_layers, n_heads, seq_len)
+    
+    # Create trainer
+    trainer = DistributedTrainer(model, rank, world_size)
+    
+    if rank == 0:
+        print(f"Starting distributed training on {world_size} GPUs")
+        print(f"Model parameters: {sum(p.numel() for p in model.parameters())/1e9:.2f}B")
+    
+    # Training loop
+    global_step = 0
+    for epoch in range(args.epochs):
+        if rank == 0:
+            print(f"Epoch {epoch + 1}/{args.epochs}")
+        
+        # Simulate training steps
+        for step in range(100):  # 100 steps per epoch
+            # Create dummy batch
+            input_ids, attention_mask, labels = create_dummy_data(batch_size, seq_len, vocab_size)
+            batch = {
+                'input_ids': input_ids,
+                'attention_mask': attention_mask, 
+                'labels': labels
+            }
+            
+            # Training step
+            loss = trainer.training_step(batch)
+            global_step += 1
+            
+            # Logging
+            if rank == 0 and step % 10 == 0:
+                print(f"Step {global_step}, Loss: {loss:.4f}")
+            
+            # Save checkpoint
+            if global_step % args.save_interval == 0:
+                trainer.save_checkpoint_distributed(epoch, global_step, loss)
+    
+    # Cleanup
+    dist.destroy_process_group()
+
+    
+    if rank == 0:
+        print("Training completed!")
     
 if __name__ == "__main__":
     # Example usage:
-    # torchrun --nproc_per_node=8 --nnodes=1 question1.py
+    # torchrun --nproc_per_node=8 --nnodes=1 question1.py --epochs 5
     main()
