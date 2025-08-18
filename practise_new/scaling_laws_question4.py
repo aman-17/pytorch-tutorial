@@ -46,23 +46,55 @@ class ScalingAnalyzer:
         Generate synthetic scaling data with realistic noise.
         y = true_coeff * x^true_exponent + noise
         """
-        # TODO: Generate x values (log-spaced)
-        # TODO: Compute true y values using power law
-        # TODO: Add realistic noise (log-normal or multiplicative)
-        # TODO: Return x, y arrays
-        pass
+        # Generate x values (log-spaced)
+        x_min, x_max = x_range
+        x = np.logspace(np.log10(x_min), np.log10(x_max), n_points)
+        
+        # Compute true y values using power law
+        y_true = true_coeff * np.power(x, true_exponent)
+        
+        # Add realistic noise (log-normal or multiplicative)
+        # Use multiplicative noise: y = y_true * exp(normal_noise)
+        noise = np.random.lognormal(0, noise_level, n_points)
+        y = y_true * noise
+        
+        return x, y
     
     def fit_power_law_linear(self, x, y):
         """
         Fit power law using linear regression in log space.
         log(y) = log(coeff) + exponent * log(x)
         """
-        # TODO: Take logarithms of x and y
-        # TODO: Use scipy.stats.linregress or numpy.polyfit
-        # TODO: Convert back to original space
-        # TODO: Calculate R^2 and standard errors
-        # TODO: Return PowerLawFit object
-        pass
+        # Take logarithms of x and y
+        log_x = np.log(x)
+        log_y = np.log(y)
+        
+        # Use scipy.stats.linregress
+        slope, intercept, r_value, p_value, std_err = linregress(log_x, log_y)
+        
+        # Convert back to original space
+        exponent = slope
+        coefficient = np.exp(intercept)
+        
+        # Calculate R^2 and standard errors
+        r_squared = r_value ** 2
+        exponent_std = std_err
+        
+        # Estimate coefficient standard error using delta method
+        coefficient_std = coefficient * std_err  # Rough approximation
+        
+        # Calculate residuals in original space
+        y_pred = coefficient * np.power(x, exponent)
+        residuals = y - y_pred
+        
+        return PowerLawFit(
+            exponent=exponent,
+            coefficient=coefficient,
+            r_squared=r_squared,
+            exponent_std=exponent_std,
+            coefficient_std=coefficient_std,
+            residuals=residuals
+        )
     
     def fit_power_law_nonlinear(self, x, y, initial_guess=None):
         """
@@ -72,19 +104,54 @@ class ScalingAnalyzer:
         def power_law(x, coeff, exponent):
             return coeff * np.power(x, exponent)
         
-        # TODO: Set reasonable initial guess if not provided
-        # TODO: Use scipy.optimize.curve_fit with bounds
-        # TODO: Handle fitting failures gracefully
-        # TODO: Calculate R^2 and parameter uncertainties
-        # TODO: Return PowerLawFit object
-        pass
+        # Set reasonable initial guess if not provided
+        if initial_guess is None:
+            # Use linear fit as initial guess
+            linear_fit = self.fit_power_law_linear(x, y)
+            initial_guess = [linear_fit.coefficient, linear_fit.exponent]
+        
+        try:
+            # Use scipy.optimize.curve_fit with bounds
+            popt, pcov = optimize.curve_fit(
+                power_law, x, y,
+                p0=initial_guess,
+                bounds=([1e-10, -np.inf], [np.inf, np.inf]),  # coefficient > 0
+                maxfev=10000
+            )
+            
+            coefficient, exponent = popt
+            param_errors = np.sqrt(np.diag(pcov))
+            coefficient_std, exponent_std = param_errors
+            
+            # Calculate R^2 and parameter uncertainties
+            y_pred = power_law(x, coefficient, exponent)
+            ss_res = np.sum((y - y_pred) ** 2)
+            ss_tot = np.sum((y - np.mean(y)) ** 2)
+            r_squared = 1 - (ss_res / ss_tot)
+            
+            residuals = y - y_pred
+            
+            return PowerLawFit(
+                exponent=exponent,
+                coefficient=coefficient,
+                r_squared=r_squared,
+                exponent_std=exponent_std,
+                coefficient_std=coefficient_std,
+                residuals=residuals
+            )
+            
+        except Exception as e:
+            # Handle fitting failures gracefully
+            print(f"Nonlinear fitting failed: {e}")
+            print("Falling back to linear fit...")
+            return self.fit_power_law_linear(x, y)
     
     def detect_scaling_regime_breaks(self, x, y, min_points=10):
         """
         Detect points where scaling law breaks down using changepoint detection.
         Returns indices where scaling regime changes.
         """
-        # TODO: Implement sliding window analysis
+        # Implement simplified sliding window analysis
         # For each possible breakpoint, fit power laws to segments
         # Find breakpoints that minimize total fitting error
         
@@ -93,11 +160,38 @@ class ScalingAnalyzer:
         
         if n < 2 * min_points:
             return breakpoints
-            
-        # TODO: Scan through potential breakpoints
-        # TODO: For each breakpoint, fit power laws to left and right segments
-        # TODO: Compare with single power law fit
-        # TODO: Use statistical tests (F-test) to determine significance
+        
+        # Fit single power law for reference
+        single_fit = self.fit_power_law_linear(x, y)
+        single_error = np.sum(single_fit.residuals ** 2)
+        
+        best_improvement = 0
+        best_breakpoint = None
+        
+        # Scan through potential breakpoints
+        for i in range(min_points, n - min_points):
+            try:
+                # Fit power laws to left and right segments
+                left_fit = self.fit_power_law_linear(x[:i], y[:i])
+                right_fit = self.fit_power_law_linear(x[i:], y[i:])
+                
+                # Calculate total error
+                left_error = np.sum(left_fit.residuals ** 2)
+                right_error = np.sum(right_fit.residuals ** 2)
+                total_error = left_error + right_error
+                
+                # Check improvement
+                improvement = single_error - total_error
+                if improvement > best_improvement:
+                    best_improvement = improvement
+                    best_breakpoint = i
+                    
+            except:
+                continue
+        
+        # Add breakpoint if improvement is significant (simple heuristic)
+        if best_improvement > 0.1 * single_error:
+            breakpoints.append(best_breakpoint)
         
         return breakpoints
     
@@ -105,11 +199,34 @@ class ScalingAnalyzer:
         """
         Extrapolate power law with uncertainty bounds.
         """
-        # TODO: Use fitted parameters to predict at x_new
-        # TODO: Propagate parameter uncertainties
-        # TODO: Calculate confidence intervals
-        # TODO: Return predictions with upper/lower bounds
-        pass
+        # Use fitted parameters to predict at x_new
+        y_pred = fit_result.coefficient * np.power(x_new, fit_result.exponent)
+        
+        # Simplified uncertainty propagation
+        # In practice, this would use the full covariance matrix
+        coeff_error = fit_result.coefficient_std
+        exp_error = fit_result.exponent_std
+        
+        # Rough approximation of prediction uncertainty
+        relative_coeff_error = coeff_error / fit_result.coefficient
+        relative_exp_error = exp_error * np.log(x_new)  # Simplified
+        
+        relative_total_error = np.sqrt(relative_coeff_error**2 + relative_exp_error**2)
+        
+        # Calculate confidence intervals (assuming normal distribution)
+        from scipy import stats
+        t_value = stats.t.ppf((1 + confidence) / 2, df=len(fit_result.residuals) - 2)
+        
+        error_bounds = y_pred * relative_total_error * t_value
+        lower_bound = y_pred - error_bounds
+        upper_bound = y_pred + error_bounds
+        
+        return {
+            'prediction': y_pred,
+            'lower_bound': lower_bound,
+            'upper_bound': upper_bound,
+            'confidence': confidence
+        }
     
     def compare_scaling_laws(self, x, y, theoretical_exponents):
         """
@@ -117,16 +234,36 @@ class ScalingAnalyzer:
         """
         results = {}
         
-        # TODO: Fit empirical power law
+        # Fit empirical power law
         empirical_fit = self.fit_power_law_nonlinear(x, y)
         results['empirical'] = empirical_fit
         
-        # TODO: For each theoretical exponent, fit coefficient only
+        # For each theoretical exponent, fit coefficient only
         for name, theory_exp in theoretical_exponents.items():
-            # TODO: Fix exponent, fit coefficient
-            # TODO: Calculate goodness of fit
-            # TODO: Store results
-            pass
+            # Fix exponent, fit coefficient using least squares
+            # y = coeff * x^theory_exp, so coeff = mean(y / x^theory_exp)
+            
+            x_powered = np.power(x, theory_exp)
+            coeff_optimal = np.sum(y * x_powered) / np.sum(x_powered * x_powered)
+            
+            # Calculate predictions and goodness of fit
+            y_pred = coeff_optimal * x_powered
+            residuals = y - y_pred
+            ss_res = np.sum(residuals ** 2)
+            ss_tot = np.sum((y - np.mean(y)) ** 2)
+            r_squared = 1 - (ss_res / ss_tot)
+            
+            # Store results
+            theoretical_fit = PowerLawFit(
+                exponent=theory_exp,
+                coefficient=coeff_optimal,
+                r_squared=r_squared,
+                exponent_std=0.0,  # Fixed
+                coefficient_std=0.0,  # Not calculated for simplicity
+                residuals=residuals
+            )
+            
+            results[name] = theoretical_fit
             
         return results
     
@@ -261,8 +398,7 @@ if __name__ == "__main__":
     analyzer = ScalingAnalyzer()
     
     # Generate test data
-    x_test = np.logspace(7, 10, 25)  # 10M to 10B parameters
-    y_test = analyzer.generate_synthetic_data(
+    x_test, y_test = analyzer.generate_synthetic_data(
         x_range=(1e7, 1e10),
         true_exponent=-0.08,
         true_coeff=3.0,

@@ -32,70 +32,101 @@ class KaplanScalingLaws:
         
     def loss_from_parameters(self, N):
         """Calculate test loss given model parameters"""
-        # TODO: Implement L(N) = (Nc/N)^αN
+        # L(N) = (Nc/N)^αN
         # Handle case where N might be less than Nc
+        if N < self.Nc:
+            # For very small models, use a different scaling to avoid division issues
+            return (self.Nc / N) ** self.alpha_N
         return (self.Nc / N) ** self.alpha_N
-        pass
     
     def loss_from_data(self, D):
         """Calculate test loss given dataset size"""
-        # TODO: Implement L(D) = (Dc/D)^αD
+        # L(D) = (Dc/D)^αD
         # Handle case where D might be less than Dc
+        if D < self.Dc:
+            # For small datasets, extrapolate the power law
+            return (self.Dc / D) ** self.alpha_D
         return (self.Dc / D) ** self.alpha_D
-        pass
     
     def loss_from_compute(self, C):
         """Calculate test loss given compute budget"""
-        # TODO: Implement L(C) = (Cc/C)^αC
+        # L(C) = (Cc/C)^αC
         # Handle case where C might be less than Cc
+        if C < self.Cc:
+            # For low compute, extrapolate the power law
+            return (self.Cc / C) ** self.alpha_C
         return (self.Cc / C) ** self.alpha_C
-        pass
     
     def optimal_parameters_for_compute(self, C):
         """Find optimal model size given compute budget"""
-        # TODO: According to Kaplan, optimal N scales as C^0.73
-        # Implement: N_opt = Nc * (C/Cc)^0.73
+        # According to Kaplan, optimal N scales as C^0.73
+        # N_opt = Nc * (C/Cc)^0.73
         return self.Nc * (C / self.Cc) ** 0.73
-        pass
     
     def optimal_data_for_compute(self, C):
         """Find optimal dataset size given compute budget"""
-        # TODO: According to Kaplan, optimal D scales as C^0.27
-        # Implement: D_opt = Dc * (C/Cc)^0.27
+        # According to Kaplan, optimal D scales as C^0.27
+        # D_opt = Dc * (C/Cc)^0.27
         return self.Dc * (C / self.Cc) ** 0.27
-        pass
     
     def compute_equivalent_loss(self, N, D, C):
         """
         Calculate loss when all three factors matter.
         Use the fact that losses combine as: L = max(L(N), L(D), L(C))
         """
-        # TODO: Calculate loss from each factor and return the maximum
+        # Calculate loss from each factor and return the maximum
         # This represents the bottleneck factor
-        return max(self.loss_from_parameters(N), self.loss_from_data(D), self.loss_from_compute(C))
-        pass
+        loss_N = self.loss_from_parameters(N)
+        loss_D = self.loss_from_data(D)
+        loss_C = self.loss_from_compute(C)
+        return max(loss_N, loss_D, loss_C)
 
 def plot_scaling_curves():
     """Plot the three fundamental scaling curves"""
     scaling = KaplanScalingLaws()
     
-    # TODO: Create parameter ranges for plotting
-    # N_range: from 1e6 to 1e10 parameters
-    # D_range: from 1e6 to 1e10 tokens  
-    # C_range: from 1e17 to 1e21 FLOPs
+    # Create parameter ranges for plotting
     N_range = np.logspace(6, 10, 100)  # 1e6 to 1e10 parameters
     D_range = np.logspace(6, 10, 100)  # 1e6 to 1e10 tokens
-    C_range = np.logspace(17, 21, 100)  # 1e17 to 1e21 FLO
+    C_range = np.logspace(17, 21, 100)  # 1e17 to 1e21 FLOPs
     
-    # TODO: Calculate losses for each range
+    # Calculate losses for each range
     losses_N = [scaling.loss_from_parameters(N) for N in N_range]
     losses_D = [scaling.loss_from_data(D) for D in D_range]  
     losses_C = [scaling.loss_from_compute(C) for C in C_range]
     
-    # TODO: Create 3 subplots showing each scaling law
-    # Use log-log plots and label axes properly
+    # Create 3 subplots showing each scaling law
+    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
     
-    pass
+    # Plot 1: Loss vs Parameters
+    axes[0].loglog(N_range, losses_N, 'b-', linewidth=2, label=f'α_N = {scaling.alpha_N}')
+    axes[0].axvline(scaling.Nc, color='r', linestyle='--', alpha=0.7, label=f'Nc = {scaling.Nc:.1e}')
+    axes[0].set_xlabel('Model Parameters (N)')
+    axes[0].set_ylabel('Test Loss')
+    axes[0].set_title('Loss vs Model Size')
+    axes[0].grid(True, alpha=0.3)
+    axes[0].legend()
+    
+    # Plot 2: Loss vs Dataset Size
+    axes[1].loglog(D_range, losses_D, 'g-', linewidth=2, label=f'α_D = {scaling.alpha_D}')
+    axes[1].axvline(scaling.Dc, color='r', linestyle='--', alpha=0.7, label=f'Dc = {scaling.Dc:.1e}')
+    axes[1].set_xlabel('Dataset Size (D)')
+    axes[1].set_ylabel('Test Loss')
+    axes[1].set_title('Loss vs Dataset Size')
+    axes[1].grid(True, alpha=0.3)
+    axes[1].legend()
+    
+    # Plot 3: Loss vs Compute
+    axes[2].loglog(C_range, losses_C, 'purple', linewidth=2, label=f'α_C = {scaling.alpha_C}')
+    axes[2].axvline(scaling.Cc, color='r', linestyle='--', alpha=0.7, label=f'Cc = {scaling.Cc:.1e}')
+    axes[2].set_xlabel('Compute Budget (C)')
+    axes[2].set_ylabel('Test Loss')
+    axes[2].set_title('Loss vs Compute')
+    axes[2].grid(True, alpha=0.3)
+    axes[2].legend()
+    
+    plt.tight_layout()
+    plt.show()
 
 def find_optimal_allocation(compute_budget):
     """

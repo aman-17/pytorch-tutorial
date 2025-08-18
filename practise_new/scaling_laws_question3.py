@@ -46,9 +46,16 @@ class ChinchillaScaling:
         Compute loss using Chinchilla's parametric approach (Equation 1).
         L(N,D) = E + A/N^alpha + B/D^beta
         """
-        # TODO: Implement the parametric loss function
+        # Implement the parametric loss function
         # Use self.constants.A, B, E, alpha, beta
-        pass
+        A = self.constants.A
+        B = self.constants.B
+        E = self.constants.E
+        alpha = self.constants.alpha
+        beta = self.constants.beta
+        
+        loss = E + A / (N ** alpha) + B / (D ** beta)
+        return loss
     
     def optimal_params_chinchilla(self, C):
         """
@@ -56,50 +63,71 @@ class ChinchillaScaling:
         Uses the constraint that C = 6*N*D (FLOPs approximation)
         And optimization: dL/dN = dL/dD = 0 under constraint
         """
-        # TODO: Implement optimal allocation
+        # Implement optimal allocation
         # From Chinchilla: N_opt ∝ C^0.5, D_opt ∝ C^0.5
         # Use the specific coefficients from the paper
         
-        # Hint: The optimal allocation gives roughly equal scaling
-        # N_opt = self.constants.a * (C/6)**(1/2)  
-        # D_opt = self.constants.b * (C/6)**(1/2)
-        pass
+        # The optimal allocation gives roughly equal scaling
+        # Based on Chinchilla paper coefficients
+        a = self.constants.a
+        b = self.constants.b
+        
+        # Adjust scaling to match Chinchilla findings
+        # N_opt and D_opt should scale equally with compute
+        sqrt_c = np.sqrt(C / 6)  # Normalize by 6 FLOPs per parameter per token
+        
+        N_opt = a * 1e8 * sqrt_c  # Scale coefficient appropriately
+        D_opt = b * 1e8 * sqrt_c  # Scale coefficient appropriately
+        
+        return N_opt, D_opt
     
     def optimal_params_kaplan(self, C):
         """
         Compute optimal N and D according to Kaplan scaling laws for comparison.
         Kaplan: N_opt ∝ C^0.73, D_opt ∝ C^0.27
         """
-        # TODO: Implement Kaplan's allocation strategy
+        # Implement Kaplan's allocation strategy
         # Use power laws: N ∝ C^0.73, D ∝ C^0.27
         # Normalize using self.N0, self.D0
-        pass
+        
+        # Reference compute for normalization
+        C0 = 6 * self.N0 * self.D0  # FLOPs for reference model
+        
+        # Kaplan's allocation
+        N_opt = self.N0 * (C / C0) ** 0.73
+        D_opt = self.D0 * (C / C0) ** 0.27
+        
+        return N_opt, D_opt
     
     def compute_flops(self, N, D):
         """
         Estimate compute (FLOPs) required for training.
         Approximation: C ≈ 6*N*D (forward + backward pass)
         """
-        # TODO: Implement FLOPs calculation
-        pass
+        # Implement FLOPs calculation
+        return 6 * N * D
     
     def loss_kaplan(self, N, D):
         """
         Kaplan loss function for comparison: L = (Nc/N)^αN + (Dc/D)^αD
         """
-        # TODO: Implement Kaplan loss
+        # Implement Kaplan loss
         # Use αN = 0.076, αD = 0.095 from Kaplan paper
         Nc = 8.8e6
         Dc = 5.4e6
         alpha_N = 0.076
         alpha_D = 0.095
-        pass
+        
+        loss_N = (Nc / N) ** alpha_N
+        loss_D = (Dc / D) ** alpha_D
+        
+        return loss_N + loss_D
 
 def compare_scaling_predictions():
     """Compare Chinchilla vs Kaplan predictions for different compute budgets"""
     scaling = ChinchillaScaling()
     
-    # TODO: Define range of compute budgets
+    # Define range of compute budgets
     compute_budgets = np.logspace(18, 22, 20)  # 1e18 to 1e22 FLOPs
     
     results = {
@@ -113,24 +141,29 @@ def compare_scaling_predictions():
     }
     
     for C in compute_budgets:
-        # TODO: Get optimal allocations from both methods
+        # Get optimal allocations from both methods
         
         # Chinchilla optimal
-        # N_chin, D_chin = scaling.optimal_params_chinchilla(C)
-        # loss_chin = scaling.loss_parametric(N_chin, D_chin)
+        N_chin, D_chin = scaling.optimal_params_chinchilla(C)
+        loss_chin = scaling.loss_parametric(N_chin, D_chin)
         
         # Kaplan optimal  
-        # N_kap, D_kap = scaling.optimal_params_kaplan(C)
-        # loss_kap = scaling.loss_kaplan(N_kap, D_kap)
+        N_kap, D_kap = scaling.optimal_params_kaplan(C)
+        loss_kap = scaling.loss_kaplan(N_kap, D_kap)
         
-        # TODO: Store results
-        pass
+        # Store results
+        results['chinchilla_N'].append(N_chin)
+        results['chinchilla_D'].append(D_chin)
+        results['chinchilla_loss'].append(loss_chin)
+        results['kaplan_N'].append(N_kap)
+        results['kaplan_D'].append(D_kap)
+        results['kaplan_loss'].append(loss_kap)
     
     return results
 
 def plot_scaling_comparison(results):
     """Plot comparison between Chinchilla and Kaplan scaling"""
-    # TODO: Create subplots comparing:
+    # Create subplots comparing:
     # 1. Model size (N) vs Compute
     # 2. Dataset size (D) vs Compute  
     # 3. Loss vs Compute
@@ -138,12 +171,46 @@ def plot_scaling_comparison(results):
     
     fig, axes = plt.subplots(2, 2, figsize=(12, 10))
     
-    # TODO: Plot 1 - Model size vs Compute
-    # TODO: Plot 2 - Dataset size vs Compute
-    # TODO: Plot 3 - Loss vs Compute
-    # TODO: Plot 4 - N vs D relationship
+    compute = results['compute']
+    
+    # Plot 1 - Model size vs Compute
+    axes[0, 0].loglog(compute, results['chinchilla_N'], 'b-', label='Chinchilla', linewidth=2)
+    axes[0, 0].loglog(compute, results['kaplan_N'], 'r--', label='Kaplan', linewidth=2)
+    axes[0, 0].set_xlabel('Compute (FLOPs)')
+    axes[0, 0].set_ylabel('Optimal Parameters (N)')
+    axes[0, 0].set_title('Model Size vs Compute')
+    axes[0, 0].legend()
+    axes[0, 0].grid(True, alpha=0.3)
+    
+    # Plot 2 - Dataset size vs Compute
+    axes[0, 1].loglog(compute, results['chinchilla_D'], 'b-', label='Chinchilla', linewidth=2)
+    axes[0, 1].loglog(compute, results['kaplan_D'], 'r--', label='Kaplan', linewidth=2)
+    axes[0, 1].set_xlabel('Compute (FLOPs)')
+    axes[0, 1].set_ylabel('Optimal Dataset Size (D)')
+    axes[0, 1].set_title('Dataset Size vs Compute')
+    axes[0, 1].legend()
+    axes[0, 1].grid(True, alpha=0.3)
+    
+    # Plot 3 - Loss vs Compute
+    axes[1, 0].loglog(compute, results['chinchilla_loss'], 'b-', label='Chinchilla', linewidth=2)
+    axes[1, 0].loglog(compute, results['kaplan_loss'], 'r--', label='Kaplan', linewidth=2)
+    axes[1, 0].set_xlabel('Compute (FLOPs)')
+    axes[1, 0].set_ylabel('Optimal Loss')
+    axes[1, 0].set_title('Loss vs Compute')
+    axes[1, 0].legend()
+    axes[1, 0].grid(True, alpha=0.3)
+    
+    # Plot 4 - N vs D relationship
+    axes[1, 1].loglog(results['chinchilla_N'], results['chinchilla_D'], 'b-', label='Chinchilla', linewidth=2)
+    axes[1, 1].loglog(results['kaplan_N'], results['kaplan_D'], 'r--', label='Kaplan', linewidth=2)
+    axes[1, 1].set_xlabel('Parameters (N)')
+    axes[1, 1].set_ylabel('Dataset Size (D)')
+    axes[1, 1].set_title('N vs D Relationship')
+    axes[1, 1].legend()
+    axes[1, 1].grid(True, alpha=0.3)
     
     plt.tight_layout()
+    plt.show()
     return fig
 
 def analyze_gpt3_efficiency():
@@ -163,20 +230,28 @@ def analyze_gpt3_efficiency():
     print(f"GPT-3 Training Tokens: {gpt3_tokens:.1e}")
     print(f"GPT-3 Estimated Compute: {gpt3_compute:.1e} FLOPs")
     
-    # TODO: Calculate Chinchilla-optimal allocation for same compute
-    # optimal_N, optimal_D = scaling.optimal_params_chinchilla(gpt3_compute)
+    # Calculate Chinchilla-optimal allocation for same compute
+    optimal_N, optimal_D = scaling.optimal_params_chinchilla(gpt3_compute)
     
-    # TODO: Compare losses
-    # gpt3_loss = scaling.loss_parametric(gpt3_params, gpt3_tokens)
-    # optimal_loss = scaling.loss_parametric(optimal_N, optimal_D)
+    # Compare losses
+    gpt3_loss = scaling.loss_parametric(gpt3_params, gpt3_tokens)
+    optimal_loss = scaling.loss_parametric(optimal_N, optimal_D)
     
-    # TODO: Print comparison and recommendations
+    # Print comparison and recommendations
     print(f"\nChinchilla-optimal for same compute:")
-    # print(f"Optimal Parameters: {optimal_N:.1e}")
-    # print(f"Optimal Tokens: {optimal_D:.1e}")
-    # print(f"GPT-3 Loss: {gpt3_loss:.4f}")
-    # print(f"Optimal Loss: {optimal_loss:.4f}")
-    # print(f"Loss Improvement: {((gpt3_loss - optimal_loss) / gpt3_loss * 100):.1f}%")
+    print(f"Optimal Parameters: {optimal_N:.1e}")
+    print(f"Optimal Tokens: {optimal_D:.1e}")
+    print(f"GPT-3 Loss: {gpt3_loss:.4f}")
+    print(f"Optimal Loss: {optimal_loss:.4f}")
+    
+    if gpt3_loss > optimal_loss:
+        improvement = ((gpt3_loss - optimal_loss) / gpt3_loss * 100)
+        print(f"Loss Improvement: {improvement:.1f}%")
+        print(f"\n📈 Analysis: GPT-3 was undertrained!")
+        print(f"   - Should use {optimal_N/gpt3_params:.1f}x fewer parameters")
+        print(f"   - Should use {optimal_D/gpt3_tokens:.1f}x more training tokens")
+    else:
+        print(f"GPT-3 appears to be optimally trained according to Chinchilla.")
 
 def chinchilla_training_calculator(target_performance, max_compute):
     """
@@ -185,7 +260,7 @@ def chinchilla_training_calculator(target_performance, max_compute):
     """
     scaling = ChinchillaScaling()
     
-    # TODO: Given target loss and compute constraint, find feasible N,D
+    # Given target loss and compute constraint, find feasible N,D
     # This involves solving: loss_parametric(N,D) = target_performance
     # Subject to: compute_flops(N,D) <= max_compute
     
@@ -193,9 +268,49 @@ def chinchilla_training_calculator(target_performance, max_compute):
     print(f"Target Loss: {target_performance:.4f}")
     print(f"Max Compute: {max_compute:.1e} FLOPs")
     
-    # TODO: Binary search or optimization to find optimal N,D
-    # that achieves target performance within compute budget
-    pass
+    # Use Chinchilla optimal allocation as starting point
+    optimal_N, optimal_D = scaling.optimal_params_chinchilla(max_compute)
+    optimal_loss = scaling.loss_parametric(optimal_N, optimal_D)
+    
+    print(f"\nChinchilla optimal allocation:")
+    print(f"Parameters: {optimal_N:.1e}")
+    print(f"Tokens: {optimal_D:.1e}")
+    print(f"Resulting Loss: {optimal_loss:.4f}")
+    
+    if optimal_loss <= target_performance:
+        print(f"✓ Target achievable with Chinchilla-optimal allocation!")
+        
+        # Find minimum compute needed for target performance
+        # Binary search over compute budgets
+        low_compute = 1e18
+        high_compute = max_compute
+        
+        for _ in range(20):  # Binary search iterations
+            mid_compute = (low_compute + high_compute) / 2
+            mid_N, mid_D = scaling.optimal_params_chinchilla(mid_compute)
+            mid_loss = scaling.loss_parametric(mid_N, mid_D)
+            
+            if mid_loss <= target_performance:
+                high_compute = mid_compute
+            else:
+                low_compute = mid_compute
+        
+        required_compute = high_compute
+        req_N, req_D = scaling.optimal_params_chinchilla(required_compute)
+        
+        print(f"\nMinimum compute needed:")
+        print(f"Compute: {required_compute:.1e} FLOPs")
+        print(f"Parameters: {req_N:.1e}")
+        print(f"Tokens: {req_D:.1e}")
+        print(f"Efficiency: {required_compute/max_compute:.1%} of max compute")
+        
+    else:
+        print(f"✗ Target not achievable with available compute.")
+        print(f"Need {target_performance/optimal_loss:.2f}x better performance.")
+        print(f"Consider:")
+        print(f"  - Increasing compute budget")
+        print(f"  - Improving model architecture")
+        print(f"  - Better data quality")
 
 # Test your implementation
 if __name__ == "__main__":
