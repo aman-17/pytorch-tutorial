@@ -176,7 +176,6 @@ class DistributedTrainer:
     
     def training_step(self, batch, accumulate_grad=True):
         """Single training step with gradient accumulation"""
-        # Move batch to device
         device = f'cuda:{self.rank}'
         for key in batch:
             batch[key] = batch[key].to(device)
