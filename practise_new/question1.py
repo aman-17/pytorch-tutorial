@@ -21,15 +21,25 @@ from torch.autograd import Function
 class SwishFunction(Function):
     @staticmethod
     def forward(ctx, input):
-        # TODO: Implement forward pass
-        # Save any tensors needed for backward pass using ctx.save_for_backward()
-        pass
+        # Implement forward pass: f(x) = x * sigmoid(x)
+        sigmoid = torch.sigmoid(input)
+        output = input * sigmoid
+        
+        # Save tensors needed for backward pass
+        ctx.save_for_backward(input, sigmoid)
+        return output
     
     @staticmethod
     def backward(ctx, grad_output):
-        # TODO: Implement backward pass
-        # Retrieve saved tensors using ctx.saved_tensors
-        pass
+        # Implement backward pass
+        # f'(x) = σ(x) + x * σ(x) * (1 - σ(x))
+        input, sigmoid = ctx.saved_tensors
+        
+        # Compute the derivative
+        derivative = sigmoid + input * sigmoid * (1 - sigmoid)
+        
+        # Apply chain rule
+        return grad_output * derivative
 
 class Swish(nn.Module):
     def forward(self, x):
