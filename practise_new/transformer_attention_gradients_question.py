@@ -15,12 +15,16 @@ Key concepts covered:
 Your task: Implement attention with detailed gradient tracking and analysis tools.
 """
 
-import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 import matplotlib.pyplot as plt
 from typing import Tuple, Dict, Optional, List
+import math
 
-class AttentionMechanism:
+class AttentionMechanism(nn.Module):
     def __init__(self, d_model: int, n_heads: int, dropout: float = 0.1):
+        super().__init__()
         self.d_model = d_model
         self.n_heads = n_heads
         self.d_k = d_model // n_heads
@@ -31,14 +35,19 @@ class AttentionMechanism:
         
     def _init_parameters(self):
         """Initialize attention parameters"""
-        # TODO: Initialize weight matrices with proper scaling
+        # Initialize weight matrices with proper scaling
         # W_q, W_k, W_v: (d_model, d_model)
         # W_o: (d_model, d_model)
         # Use Xavier initialization: std = sqrt(2 / (fan_in + fan_out))
-        pass
+        std = math.sqrt(2.0 / (self.d_model + self.d_model))
+        
+        self.W_q = nn.Parameter(torch.randn(self.d_model, self.d_model) * std)
+        self.W_k = nn.Parameter(torch.randn(self.d_model, self.d_model) * std)
+        self.W_v = nn.Parameter(torch.randn(self.d_model, self.d_model) * std)
+        self.W_o = nn.Parameter(torch.randn(self.d_model, self.d_model) * std)
     
-    def scaled_dot_product_attention(self, Q: np.ndarray, K: np.ndarray, V: np.ndarray, 
-                                   mask: Optional[np.ndarray] = None) -> Tuple[np.ndarray, np.ndarray, Dict]:
+    def scaled_dot_product_attention(self, Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor, 
+                                   mask: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor, Dict]:
         """
         Implement scaled dot-product attention with gradient tracking.
         
@@ -52,36 +61,37 @@ class AttentionMechanism:
         """
         batch_size, n_heads, seq_len, d_k = Q.shape
         
-        # TODO: Compute attention scores
+        # Compute attention scores
         # scores = Q @ K^T / sqrt(d_k)
-        # Be careful about the matrix multiplication dimensions
+        scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(d_k)
         
-        # TODO: Apply mask if provided
-        # masked_scores = scores + mask (where mask has -inf for masked positions)
+        # Apply mask if provided
+        if mask is not None:
+            scores = scores + mask  # mask has -inf for masked positions
+        masked_scores = scores
         
-        # TODO: Apply softmax with numerical stability
-        # Use the numerically stable version:
-        # softmax(x) = exp(x - max(x)) / sum(exp(x - max(x)))
+        # Apply softmax with numerical stability
+        attention_weights = F.softmax(scores, dim=-1)
         
-        # TODO: Apply attention weights to values
-        # attention_output = attention_weights @ V
+        # Apply attention weights to values
+        attention_output = torch.matmul(attention_weights, V)
         
         cache = {
             'Q': Q,
             'K': K, 
             'V': V,
-            'scores': None,  # TODO: store computed values
-            'masked_scores': None,
-            'attention_weights': None,
+            'scores': scores,
+            'masked_scores': masked_scores,
+            'attention_weights': attention_weights,
             'mask': mask,
             'd_k': d_k
         }
         
-        return None, None, cache  # TODO: return (attention_output, attention_weights, cache)
+        return attention_output, attention_weights, cache
     
-    def scaled_dot_product_attention_backward(self, dout: np.ndarray, 
-                                            attention_weights: np.ndarray, 
-                                            cache: Dict) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def scaled_dot_product_attention_backward(self, dout: torch.Tensor, 
+                                            attention_weights: torch.Tensor, 
+                                            cache: Dict) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Backward pass for scaled dot-product attention.
         
@@ -93,92 +103,118 @@ class AttentionMechanism:
         Q, K, V = cache['Q'], cache['K'], cache['V']
         d_k = cache['d_k']
         
-        # TODO: Gradient w.r.t. V
-        # dV = attention_weights^T @ dout
+        # Gradient w.r.t. V
+        dV = torch.matmul(attention_weights.transpose(-2, -1), dout)
         
-        # TODO: Gradient w.r.t. attention_weights
-        # d_attention_weights = dout @ V^T
+        # Gradient w.r.t. attention_weights
+        d_attention_weights = torch.matmul(dout, V.transpose(-2, -1))
         
-        # TODO: Gradient through softmax (this is the tricky part!)
-        # For softmax gradient: d_softmax = softmax * (d_upstream - sum(d_upstream * softmax, axis=-1, keepdims=True))
+        # Gradient through softmax (this is the tricky part!)
+        # For softmax gradient: d_softmax = softmax * (d_upstream - (d_upstream * softmax).sum(dim=-1, keepdim=True))
+        softmax_sum = torch.sum(d_attention_weights * attention_weights, dim=-1, keepdim=True)
+        d_scores = attention_weights * (d_attention_weights - softmax_sum)
         
-        # TODO: Gradient w.r.t. scores (before softmax)
-        # d_scores = softmax_gradient
+        # Apply mask gradient if mask was used
+        if cache['mask'] is not None:
+            d_scores = d_scores.masked_fill(cache['mask'] == float('-inf'), 0.0)
         
-        # TODO: Apply mask gradient if mask was used
-        # Masked positions should have zero gradient
+        # Gradient w.r.t. Q and K
+        dQ = torch.matmul(d_scores, K) / math.sqrt(d_k)
+        dK = torch.matmul(d_scores.transpose(-2, -1), Q) / math.sqrt(d_k)
         
-        # TODO: Gradient w.r.t. Q and K
-        # dQ = d_scores @ K / sqrt(d_k)
-        # dK = d_scores^T @ Q / sqrt(d_k)
-        
-        return None, None, None  # TODO: return (dQ, dK, dV)
+        return dQ, dK, dV
     
-    def multi_head_attention_forward(self, x: np.ndarray, 
-                                   mask: Optional[np.ndarray] = None) -> Tuple[np.ndarray, Dict]:
+    def multi_head_attention_forward(self, x: torch.Tensor, 
+                                   mask: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, Dict]:
         """
         Multi-head attention forward pass.
         x: (batch_size, seq_len, d_model)
         """
         batch_size, seq_len, d_model = x.shape
         
-        # TODO: Compute Q, K, V projections
-        # Q = x @ W_q, K = x @ W_k, V = x @ W_v
+        # Compute Q, K, V projections
+        Q_proj = torch.matmul(x, self.W_q)
+        K_proj = torch.matmul(x, self.W_k)
+        V_proj = torch.matmul(x, self.W_v)
         
-        # TODO: Reshape for multi-head attention
+        # Reshape for multi-head attention
         # From (batch_size, seq_len, d_model) to (batch_size, n_heads, seq_len, d_k)
-        # Hint: use reshape and transpose operations
+        Q_heads = Q_proj.view(batch_size, seq_len, self.n_heads, self.d_k).transpose(1, 2)
+        K_heads = K_proj.view(batch_size, seq_len, self.n_heads, self.d_k).transpose(1, 2)
+        V_heads = V_proj.view(batch_size, seq_len, self.n_heads, self.d_k).transpose(1, 2)
         
-        # TODO: Apply scaled dot-product attention
-        # attention_output, attention_weights, attention_cache = self.scaled_dot_product_attention(Q, K, V, mask)
+        # Apply scaled dot-product attention
+        attention_output, attention_weights, attention_cache = self.scaled_dot_product_attention(Q_heads, K_heads, V_heads, mask)
         
-        # TODO: Concatenate heads and apply output projection
+        # Concatenate heads and apply output projection
         # Reshape back to (batch_size, seq_len, d_model)
-        # Apply final linear transformation: output @ W_o
+        concat_output = attention_output.transpose(1, 2).contiguous().view(batch_size, seq_len, d_model)
+        output = torch.matmul(concat_output, self.W_o)
         
         cache = {
             'x': x,
-            'Q_proj': None,  # TODO: store projected Q, K, V
-            'K_proj': None,
-            'V_proj': None,
-            'Q_heads': None,  # TODO: store reshaped Q, K, V for heads
-            'K_heads': None,
-            'V_heads': None,
-            'attention_output': None,
-            'attention_weights': None,
-            'attention_cache': None,
-            'concat_output': None
+            'Q_proj': Q_proj,
+            'K_proj': K_proj,
+            'V_proj': V_proj,
+            'Q_heads': Q_heads,
+            'K_heads': K_heads,
+            'V_heads': V_heads,
+            'attention_output': attention_output,
+            'attention_weights': attention_weights,
+            'attention_cache': attention_cache,
+            'concat_output': concat_output
         }
         
-        return None, cache  # TODO: return (output, cache)
+        return output, cache
     
-    def multi_head_attention_backward(self, dout: np.ndarray, cache: Dict) -> Tuple[np.ndarray, Dict]:
+    def multi_head_attention_backward(self, dout: torch.Tensor, cache: Dict) -> Tuple[torch.Tensor, Dict]:
         """
         Multi-head attention backward pass.
         """
-        # TODO: Implement backward pass through multi-head attention
+        # Implement backward pass through multi-head attention
         # Work backwards through:
         # 1. Output projection (W_o)
+        dW_o = torch.matmul(cache['concat_output'].transpose(-2, -1), dout)
+        d_concat = torch.matmul(dout, self.W_o.transpose(-2, -1))
+        
         # 2. Concatenation of heads
+        batch_size, seq_len, d_model = d_concat.shape
+        d_attention_output = d_concat.view(batch_size, seq_len, self.n_heads, self.d_k).transpose(1, 2)
+        
         # 3. Scaled dot-product attention for each head
+        dQ_heads, dK_heads, dV_heads = self.scaled_dot_product_attention_backward(
+            d_attention_output, cache['attention_weights'], cache['attention_cache'])
+        
         # 4. Head reshaping
+        dQ_proj = dQ_heads.transpose(1, 2).contiguous().view(batch_size, seq_len, d_model)
+        dK_proj = dK_heads.transpose(1, 2).contiguous().view(batch_size, seq_len, d_model)
+        dV_proj = dV_heads.transpose(1, 2).contiguous().view(batch_size, seq_len, d_model)
+        
         # 5. Q, K, V projections
+        dW_q = torch.matmul(cache['x'].transpose(-2, -1), dQ_proj)
+        dW_k = torch.matmul(cache['x'].transpose(-2, -1), dK_proj)
+        dW_v = torch.matmul(cache['x'].transpose(-2, -1), dV_proj)
+        
+        dx_q = torch.matmul(dQ_proj, self.W_q.transpose(-2, -1))
+        dx_k = torch.matmul(dK_proj, self.W_k.transpose(-2, -1))
+        dx_v = torch.matmul(dV_proj, self.W_v.transpose(-2, -1))
+        dx = dx_q + dx_k + dx_v
         
         grads = {
-            'dW_q': None,  # TODO: compute parameter gradients
-            'dW_k': None,
-            'dW_v': None,
-            'dW_o': None
+            'dW_q': dW_q,
+            'dW_k': dW_k,
+            'dW_v': dW_v,
+            'dW_o': dW_o
         }
         
-        return None, grads  # TODO: return (dx, grads)
+        return dx, grads
     
-    def analyze_attention_patterns(self, x: np.ndarray, 
+    def analyze_attention_patterns(self, x: torch.Tensor, 
                                  layer_names: List[str] = None) -> Dict:
         """
         Analyze attention patterns and their gradients.
         """
-        # TODO: Forward pass to get attention weights
+        # Forward pass to get attention weights
         output, cache = self.multi_head_attention_forward(x)
         
         if output is None:
@@ -186,75 +222,99 @@ class AttentionMechanism:
             
         attention_weights = cache['attention_weights']
         
+        # Compute attention entropy for each head
+        # entropy = -sum(p * log(p)) where p is attention weights
+        eps = 1e-8
+        entropy = -torch.sum(attention_weights * torch.log(attention_weights + eps), dim=-1)
+        entropy = torch.mean(entropy, dim=(0, 2))  # Average over batch and sequence
+        
+        # Compute average attention distance
+        batch_size, n_heads, seq_len, _ = attention_weights.shape
+        position_indices = torch.arange(seq_len, device=attention_weights.device).float()
+        position_diffs = position_indices.unsqueeze(0) - position_indices.unsqueeze(1)
+        abs_position_diffs = torch.abs(position_diffs)
+        attention_distance = torch.sum(attention_weights * abs_position_diffs.unsqueeze(0).unsqueeze(0), dim=-1)
+        attention_distance = torch.mean(attention_distance, dim=(0, 2))
+        
+        # Find positions with highest attention values
+        max_attention, max_indices = torch.max(attention_weights, dim=-1)
+        max_attention = torch.mean(max_attention, dim=(0, 2))
+        
         analysis = {
             'attention_weights': attention_weights,
-            'entropy': None,  # TODO: compute attention entropy
-            'max_attention': None,  # TODO: find max attention values
-            'attention_distance': None,  # TODO: average attention distance
+            'entropy': entropy,
+            'max_attention': max_attention,
+            'attention_distance': attention_distance,
         }
-        
-        # TODO: Compute attention entropy for each head
-        # entropy = -sum(p * log(p)) where p is attention weights
-        
-        # TODO: Compute average attention distance
-        # How far on average does each position attend to?
-        
-        # TODO: Find positions with highest attention values
         
         return analysis
     
-    def compute_gradient_norms(self, x: np.ndarray, target: np.ndarray) -> Dict:
+    def compute_gradient_norms(self, x: torch.Tensor, target: torch.Tensor) -> Dict:
         """
         Compute gradient norms for analysis of training dynamics.
         """
-        # TODO: Forward pass
+        # Forward pass
         output, cache = self.multi_head_attention_forward(x)
         
         if output is None:
             return {'error': 'Forward pass not implemented'}
         
-        # TODO: Compute loss (e.g., MSE with target)
-        # loss = 0.5 * sum((output - target)^2)
+        # Compute loss (e.g., MSE with target)
+        loss = F.mse_loss(output, target)
         
-        # TODO: Backward pass
-        # dout = output - target
-        dx, grads = self.multi_head_attention_backward(None, cache)  # TODO: pass correct dout
+        # Backward pass using torch.autograd
+        loss.backward(retain_graph=True)
         
-        # TODO: Compute gradient norms
+        # Compute gradient norms
         grad_norms = {
-            'input_grad_norm': None,  # TODO: ||dx||
-            'W_q_grad_norm': None,    # TODO: ||dW_q||
-            'W_k_grad_norm': None,    # TODO: ||dW_k||
-            'W_v_grad_norm': None,    # TODO: ||dW_v||
-            'W_o_grad_norm': None,    # TODO: ||dW_o||
-            'total_grad_norm': None   # TODO: sum of all parameter grad norms
+            'input_grad_norm': torch.norm(x.grad).item() if x.grad is not None else 0.0,
+            'W_q_grad_norm': torch.norm(self.W_q.grad).item() if self.W_q.grad is not None else 0.0,
+            'W_k_grad_norm': torch.norm(self.W_k.grad).item() if self.W_k.grad is not None else 0.0,
+            'W_v_grad_norm': torch.norm(self.W_v.grad).item() if self.W_v.grad is not None else 0.0,
+            'W_o_grad_norm': torch.norm(self.W_o.grad).item() if self.W_o.grad is not None else 0.0,
         }
+        grad_norms['total_grad_norm'] = sum(grad_norms.values())
         
         return grad_norms
 
-def visualize_attention_patterns(attention_weights: np.ndarray, tokens: List[str] = None):
+def visualize_attention_patterns(attention_weights: torch.Tensor, tokens: List[str] = None):
     """
     Visualize attention patterns as heatmaps.
     attention_weights: (n_heads, seq_len, seq_len)
     """
-    # TODO: Create heatmap visualization of attention patterns
-    # Show attention weights for each head
-    # If tokens are provided, use them as axis labels
+    # Create heatmap visualization of attention patterns
+    # Convert torch tensor to numpy for matplotlib
+    attention_np = attention_weights.detach().cpu().numpy()
     
     n_heads = attention_weights.shape[0]
     
-    # TODO: Create subplot for each attention head
-    # Use matplotlib to create heatmaps
-    # Add colorbar and proper labels
+    # Create subplot for each attention head
+    fig, axes = plt.subplots(1, n_heads, figsize=(4 * n_heads, 4))
+    if n_heads == 1:
+        axes = [axes]
     
-    pass
+    for head in range(n_heads):
+        im = axes[head].imshow(attention_np[head], cmap='Blues', aspect='auto')
+        axes[head].set_title(f'Head {head + 1}')
+        
+        if tokens is not None:
+            axes[head].set_xticks(range(len(tokens)))
+            axes[head].set_yticks(range(len(tokens)))
+            axes[head].set_xticklabels(tokens, rotation=45)
+            axes[head].set_yticklabels(tokens)
+        
+        plt.colorbar(im, ax=axes[head])
+    
+    plt.tight_layout()
+    plt.show()
 
-def gradient_flow_analysis(model: AttentionMechanism, x: np.ndarray, 
+def gradient_flow_analysis(model: AttentionMechanism, x: torch.Tensor, 
                          num_steps: int = 10) -> Dict:
     """
     Analyze how gradients flow through attention during training.
     """
-    # TODO: Simulate training steps and track gradient statistics
+    # Simulate training steps and track gradient statistics
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
     
     results = {
         'step': [],
@@ -263,31 +323,67 @@ def gradient_flow_analysis(model: AttentionMechanism, x: np.ndarray,
         'loss': []
     }
     
-    # TODO: For each training step:
-    # 1. Forward pass
-    # 2. Compute loss (random target for simulation)
-    # 3. Backward pass  
-    # 4. Track gradient norms and attention statistics
-    # 5. Update parameters (simple SGD)
+    # For each training step:
+    for step in range(num_steps):
+        # 1. Forward pass
+        output, cache = model.multi_head_attention_forward(x)
+        if output is None:
+            break
+            
+        # 2. Compute loss (random target for simulation)
+        target = torch.randn_like(output)
+        loss = F.mse_loss(output, target)
+        
+        # 3. Backward pass using torch.autograd
+        optimizer.zero_grad()
+        loss.backward()
+        
+        # 4. Track gradient norms and attention statistics
+        total_grad_norm = 0.0
+        for param in model.parameters():
+            if param.grad is not None:
+                total_grad_norm += torch.norm(param.grad).item() ** 2
+        total_grad_norm = total_grad_norm ** 0.5
+        
+        # Compute attention entropy
+        attention_weights = cache['attention_weights']
+        eps = 1e-8
+        entropy = -torch.sum(attention_weights * torch.log(attention_weights + eps), dim=-1)
+        avg_entropy = torch.mean(entropy).item()
+        
+        results['step'].append(step)
+        results['grad_norms'].append(total_grad_norm)
+        results['attention_entropy'].append(avg_entropy)
+        results['loss'].append(loss.item())
+        
+        # 5. Update parameters (simple SGD)
+        optimizer.step()
     
     return results
 
-def test_gradient_correctness(model: AttentionMechanism, x: np.ndarray, epsilon: float = 1e-5):
+def test_gradient_correctness(model: AttentionMechanism, x: torch.Tensor, epsilon: float = 1e-5):
     """
-    Test gradient correctness using numerical differentiation.
+    Test gradient correctness using torch.autograd.gradcheck.
     """
     print("=== Testing Gradient Correctness ===")
     
-    # TODO: Implement numerical gradient checking
-    # 1. Compute analytical gradients using backward pass
-    # 2. Compute numerical gradients using finite differences
-    # 3. Compare relative error for each parameter
-    
-    # For each parameter W:
-    # numerical_grad[i,j] = (f(W + eps*e_ij) - f(W - eps*e_ij)) / (2*eps)
-    # where e_ij is unit vector with 1 at position (i,j)
-    
-    pass
+    # Use torch.autograd.gradcheck to verify gradients
+    try:
+        # Create a simple function that computes loss
+        def attention_loss(input_tensor):
+            output, _ = model.multi_head_attention_forward(input_tensor)
+            return torch.sum(output ** 2)
+        
+        # Test gradient correctness
+        test_passed = torch.autograd.gradcheck(attention_loss, x, eps=epsilon, atol=1e-4)
+        
+        if test_passed:
+            print("✓ Gradient check passed!")
+        else:
+            print("✗ Gradient check failed!")
+            
+    except Exception as e:
+        print(f"✗ Gradient check failed with error: {e}")
 
 def attention_memory_analysis(d_model: int, seq_lengths: List[int], n_heads: int = 8):
     """
@@ -295,11 +391,8 @@ def attention_memory_analysis(d_model: int, seq_lengths: List[int], n_heads: int
     """
     print("=== Attention Memory Analysis ===")
     
-    # TODO: For each sequence length, compute:
-    # 1. Memory for storing Q, K, V matrices
-    # 2. Memory for attention score matrix (seq_len^2)
-    # 3. Memory for gradients
-    # 4. Total memory usage
+    batch_size = 1  # Assume batch size of 1 for analysis
+    bytes_per_float = 4  # float32
     
     results = {
         'seq_lengths': seq_lengths,
@@ -310,14 +403,28 @@ def attention_memory_analysis(d_model: int, seq_lengths: List[int], n_heads: int
     }
     
     for seq_len in seq_lengths:
-        # TODO: Calculate memory requirements
-        # Assume float32 (4 bytes per parameter)
-        
+        # Calculate memory requirements
         # QKV memory: 3 * batch_size * seq_len * d_model * 4 bytes
-        # Scores memory: batch_size * n_heads * seq_len^2 * 4 bytes
-        # etc.
+        qkv_memory = 3 * batch_size * seq_len * d_model * bytes_per_float
         
-        pass
+        # Scores memory: batch_size * n_heads * seq_len^2 * 4 bytes
+        scores_memory = batch_size * n_heads * seq_len * seq_len * bytes_per_float
+        
+        # Gradients memory (approximately same as forward pass)
+        gradients_memory = qkv_memory + scores_memory
+        
+        # Parameter memory: 4 weight matrices of size (d_model, d_model)
+        param_memory = 4 * d_model * d_model * bytes_per_float
+        
+        total_memory = qkv_memory + scores_memory + gradients_memory + param_memory
+        
+        results['qkv_memory'].append(qkv_memory / (1024**2))  # Convert to MB
+        results['scores_memory'].append(scores_memory / (1024**2))
+        results['gradients_memory'].append(gradients_memory / (1024**2))
+        results['total_memory'].append(total_memory / (1024**2))
+        
+        print(f"Seq len {seq_len}: QKV={qkv_memory/(1024**2):.1f}MB, "
+              f"Scores={scores_memory/(1024**2):.1f}MB, Total={total_memory/(1024**2):.1f}MB")
     
     return results
 
@@ -333,7 +440,7 @@ if __name__ == "__main__":
     
     # Create model and test data
     model = AttentionMechanism(d_model, n_heads)
-    x = np.random.randn(batch_size, seq_len, d_model)
+    x = torch.randn(batch_size, seq_len, d_model, requires_grad=True)
     
     print(f"Input shape: {x.shape}")
     print(f"Model: d_model={d_model}, n_heads={n_heads}")
@@ -348,7 +455,7 @@ if __name__ == "__main__":
         
         # Test backward pass
         print("\n=== Testing Backward Pass ===")
-        dout = np.random.randn(*output.shape)
+        dout = torch.randn(*output.shape)
         dx, grads = model.multi_head_attention_backward(dout, cache)
         
         if dx is not None:
@@ -381,8 +488,9 @@ if __name__ == "__main__":
     print(f"Memory analysis for sequence lengths: {seq_lengths}")
     
     print("\n=== Implementation Tips ===")
-    print("1. Pay special attention to softmax gradient computation")
-    print("2. Use numerically stable softmax (subtract max before exp)")
-    print("3. Be careful with matrix dimension ordering in multi-head attention")
-    print("4. Test with numerical gradient checking")
-    print("5. Consider memory-efficient implementations for long sequences")
+    print("1. Use torch.autograd.gradcheck for gradient verification")
+    print("2. Use F.softmax with dim=-1 for numerically stable softmax")
+    print("3. Be careful with tensor dimensions in multi-head attention")
+    print("4. Use tensor.requires_grad_(True) for gradient tracking")
+    print("5. Consider using torch.nn.MultiheadAttention for comparison")
+    print("6. Use torch.cuda.memory_summary() for memory profiling")

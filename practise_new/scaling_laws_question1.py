@@ -34,28 +34,35 @@ class KaplanScalingLaws:
         """Calculate test loss given model parameters"""
         # TODO: Implement L(N) = (Nc/N)^αN
         # Handle case where N might be less than Nc
+        return (self.Nc / N) ** self.alpha_N
         pass
     
     def loss_from_data(self, D):
         """Calculate test loss given dataset size"""
         # TODO: Implement L(D) = (Dc/D)^αD
+        # Handle case where D might be less than Dc
+        return (self.Dc / D) ** self.alpha_D
         pass
     
     def loss_from_compute(self, C):
         """Calculate test loss given compute budget"""
         # TODO: Implement L(C) = (Cc/C)^αC
+        # Handle case where C might be less than Cc
+        return (self.Cc / C) ** self.alpha_C
         pass
     
     def optimal_parameters_for_compute(self, C):
         """Find optimal model size given compute budget"""
         # TODO: According to Kaplan, optimal N scales as C^0.73
         # Implement: N_opt = Nc * (C/Cc)^0.73
+        return self.Nc * (C / self.Cc) ** 0.73
         pass
     
     def optimal_data_for_compute(self, C):
         """Find optimal dataset size given compute budget"""
         # TODO: According to Kaplan, optimal D scales as C^0.27
         # Implement: D_opt = Dc * (C/Cc)^0.27
+        return self.Dc * (C / self.Cc) ** 0.27
         pass
     
     def compute_equivalent_loss(self, N, D, C):
@@ -65,6 +72,7 @@ class KaplanScalingLaws:
         """
         # TODO: Calculate loss from each factor and return the maximum
         # This represents the bottleneck factor
+        return max(self.loss_from_parameters(N), self.loss_from_data(D), self.loss_from_compute(C))
         pass
 
 def plot_scaling_curves():
@@ -75,14 +83,18 @@ def plot_scaling_curves():
     # N_range: from 1e6 to 1e10 parameters
     # D_range: from 1e6 to 1e10 tokens  
     # C_range: from 1e17 to 1e21 FLOPs
+    N_range = np.logspace(6, 10, 100)  # 1e6 to 1e10 parameters
+    D_range = np.logspace(6, 10, 100)  # 1e6 to 1e10 tokens
+    C_range = np.logspace(17, 21, 100)  # 1e17 to 1e21 FLO
     
     # TODO: Calculate losses for each range
-    # losses_N = [scaling.loss_from_parameters(N) for N in N_range]
-    # losses_D = [scaling.loss_from_data(D) for D in D_range]  
-    # losses_C = [scaling.loss_from_compute(C) for C in C_range]
+    losses_N = [scaling.loss_from_parameters(N) for N in N_range]
+    losses_D = [scaling.loss_from_data(D) for D in D_range]  
+    losses_C = [scaling.loss_from_compute(C) for C in C_range]
     
     # TODO: Create 3 subplots showing each scaling law
     # Use log-log plots and label axes properly
+    
     pass
 
 def find_optimal_allocation(compute_budget):

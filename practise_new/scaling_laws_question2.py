@@ -28,6 +28,7 @@ class muPLinear(nn.Module):
         
         # TODO: Create weight parameter
         # Initialize with muP scaling: std = init_scale / sqrt(in_features)
+        self.weight = nn.Parameter(torch.randn(out_features, in_features) / math.sqrt(in_features))
         
         # TODO: Create bias parameter if needed
         
@@ -36,6 +37,7 @@ class muPLinear(nn.Module):
     def forward(self, x):
         # TODO: Implement forward pass
         # For readout layers, scale output by 1/width_multiplier
+        
         pass
 
 class muPAttention(nn.Module):

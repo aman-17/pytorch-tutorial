@@ -40,20 +40,17 @@ class TransformerBlock(nn.Module):
         self.dropout = nn.Dropout(dropout)
     
     def forward(self, x, mask=None):
-        # TODO: Implement with proper residual connections
-        # 1. Self-attention with residual connection
-        # 2. Layer normalization
-        # 3. Feed-forward with residual connection
-        # 4. Handle attention masks properly
+        # Self-attention with residual connection
         shortcut = x
         x = self.norm1(x)
-        x, _ = self.attention(x, attn_mask=mask)
+        x, _ = self.attention(x, x, x, attn_mask=mask)
         x = self.dropout(x)
         x = x + shortcut
+        
+        # Feed-forward with residual connection
         shortcut = x
         x = self.norm2(x)
         x = self.ffn(x)
-        x = self.dropout(x)
         x = x + shortcut
         return x
 
@@ -75,18 +72,19 @@ class LargeTransformer(nn.Module):
         self.output_head.weight = self.embedding.weight
     
     def forward(self, input_ids, attention_mask=None):
-        # TODO: Implement forward pass
-        # 1. Token embeddings + positional embeddings
-        # 2. Pass through transformer layers
-        # 3. Final layer norm and output projection
+        # Token embeddings + positional embeddings
         batch_size, seq_len = input_ids.shape
         tok_embeds = self.embedding(input_ids)
         pos_ids = torch.arange(0, seq_len, device=input_ids.device, dtype=torch.long)
         pos_embeds = self.pos_embedding(pos_ids).unsqueeze(0)
         x = tok_embeds + pos_embeds
         x = self.dropout(x)
+        
+        # Pass through transformer layers
         for layer in self.layers:
             x = layer(x, mask=attention_mask)
+            
+        # Final layer norm and output projection
         x = self.ln_f(x)
         logits = self.output_head(x)
         return logits
@@ -100,15 +98,21 @@ def setup_ddp_training(rank, world_size, backend='nccl'):
         world_size: Total number of processes
         backend: Communication backend ('nccl' for GPU, 'gloo' for CPU)
     """
-    # TODO: Implement DDP setup
-    # 1. Set up environment variables (MASTER_ADDR, MASTER_PORT)
-    # 2. Initialize process group
-    # 3. Set device for current rank
-    # 4. Handle error cases and cleanup
-    os.environ['MASTER_ADDR'] = 'localhost'
-    os.environ['MASTER_PORT'] = '12355'
+    # Set up environment variables (MASTER_ADDR, MASTER_PORT)
+    if 'MASTER_ADDR' not in os.environ:
+        os.environ['MASTER_ADDR'] = 'localhost'
+    if 'MASTER_PORT' not in os.environ:
+        os.environ['MASTER_PORT'] = '12355'
+    
+    # Initialize process group
     dist.init_process_group(backend, rank=rank, world_size=world_size)
-    torch.cuda.set_device(rank)
+    
+    # Set device for current rank
+    if torch.cuda.is_available():
+        torch.cuda.set_device(rank)
+        print(f"Rank {rank}: Using GPU {rank}")
+    else:
+        print(f"Rank {rank}: Using CPU (CUDA not available)")
 
 class DistributedTrainer:
     def __init__(self, model, rank, world_size, gradient_accumulation_steps=4):
@@ -130,11 +134,14 @@ class DistributedTrainer:
 
     def scale_learning_rate(self, base_lr):
         """Scale learning rate for distributed training"""
-        # TODO: Implement learning rate scaling strategies
-        # 1. Linear scaling: lr = base_lr * world_size
-        # 2. Sqrt scaling: lr = base_lr * sqrt(world_size)
-        # 3. Consider warmup strategies
-        return base_lr * self.world_size
+        # Linear scaling: lr = base_lr * world_size
+        # This is the most common approach for large batch training
+        scaled_lr = base_lr * self.world_size
+        
+        if self.rank == 0:
+            print(f"Scaling learning rate: {base_lr} -> {scaled_lr} (factor: {self.world_size})")
+        
+        return scaled_lr
     
     def sync_gradients(self):
         """Synchronize gradients across all processes"""
@@ -271,8 +278,11 @@ def main():
     rank = int(os.environ.get('LOCAL_RANK', args.rank))
     world_size = int(os.environ.get('WORLD_SIZE', args.world_size))
     
-    # Setup distributed environment
-    setup_ddp_training(rank, world_size)
+    # Setup distributed environment (skip for single GPU demo)
+    if world_size > 1:
+        setup_ddp_training(rank, world_size)
+    else:
+        print("Running single GPU demo (no distributed setup needed)")
     
     # Hyperparameters
     vocab_size = 50000
@@ -286,7 +296,38 @@ def main():
     model = LargeTransformer(vocab_size, d_model, n_layers, n_heads, seq_len)
     
     # Create trainer
-    trainer = DistributedTrainer(model, rank, world_size)
+    if world_size > 1:
+        trainer = DistributedTrainer(model, rank, world_size)
+    else:
+        # Single GPU trainer for demo
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        model = model.to(device)
+        optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
+        
+        class SingleGPUTrainer:
+            def __init__(self, model, optimizer, rank=0):
+                self.model = model
+                self.optimizer = optimizer
+                self.rank = rank
+                
+            def training_step(self, batch):
+                device = next(self.model.parameters()).device
+                for key in batch:
+                    batch[key] = batch[key].to(device)
+                
+                outputs = self.model(batch['input_ids'], attention_mask=batch['attention_mask'])
+                loss = torch.nn.functional.cross_entropy(outputs.view(-1, outputs.size(-1)), batch['labels'].view(-1))
+                
+                loss.backward()
+                self.optimizer.step()
+                self.optimizer.zero_grad()
+                
+                return loss.item()
+                
+            def save_checkpoint_distributed(self, epoch, step, loss):
+                print(f"Would save checkpoint: epoch {epoch}, step {step}, loss {loss:.4f}")
+        
+        trainer = SingleGPUTrainer(model, optimizer, rank)
     
     if rank == 0:
         print(f"Starting distributed training on {world_size} GPUs")

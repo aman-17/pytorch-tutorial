@@ -19,10 +19,24 @@ Tasks:
 import torch
 import torch.nn as nn
 
-from torch.distributed.pipelining import pipeline, ScheduleGPipe, SplitPoint
+# from torch.distributed.pipelining import pipeline, ScheduleGPipe, SplitPoint  # Not available in all PyTorch versions
 import torch.distributed as dist
 from typing import List, Dict, Any
 import time
+
+class EmbeddingLayer(nn.Module):
+    """Combined embedding and positional embedding layer"""
+    def __init__(self, token_embedding, pos_embedding):
+        super().__init__()
+        self.token_embedding = token_embedding
+        self.pos_embedding = pos_embedding
+    
+    def forward(self, input_ids):
+        seq_len = input_ids.shape[1]
+        tok_embeds = self.token_embedding(input_ids)
+        pos_ids = torch.arange(0, seq_len, device=input_ids.device, dtype=torch.long)
+        pos_embeds = self.pos_embedding(pos_ids).unsqueeze(0)
+        return tok_embeds + pos_embeds
 
 class TransformerBlock(nn.Module):
     def __init__(self, d_model, n_heads, dropout=0.1):
@@ -115,7 +129,8 @@ class PipelinePartitioner:
         for i in range(layers_per_device):
             first_partition.append((f'layer_{i}', self.model.layers[i]))
         
-        partitions.append(nn.Sequential(dict(first_partition)))
+        first_modules = [module for _, module in first_partition]
+        partitions.append(nn.Sequential(*first_modules))
         
         # Middle devices get transformer layers only
         for device_idx in range(1, self.world_size - 1):
@@ -126,7 +141,8 @@ class PipelinePartitioner:
             for i in range(start_layer, end_layer):
                 device_layers.append((f'layer_{i}', self.model.layers[i]))
             
-            partitions.append(nn.Sequential(dict(device_layers)))
+            device_modules = [module for _, module in device_layers]
+            partitions.append(nn.Sequential(*device_modules))
         
         # Last device gets remaining layers + output head
         if self.world_size > 1:
@@ -139,7 +155,8 @@ class PipelinePartitioner:
             last_partition.append(('ln_f', self.model.ln_f))
             last_partition.append(('output_head', self.model.output_head))
             
-            partitions.append(nn.Sequential(dict(last_partition)))
+            last_modules = [module for _, module in last_partition]
+        partitions.append(nn.Sequential(*last_modules))
         
         return partitions
     
@@ -228,19 +245,46 @@ class MicroBatchManager:
     
     def split_batch(self, batch):
         """Split batch into micro-batches"""
-        # TODO: Implement batch splitting
-        # 1. Split input tensors into micro-batches
-        # 2. Handle remainder if batch_size not divisible
-        # 3. Return list of micro-batches
-        pass
+        microbatches = []
+        
+        if isinstance(batch, dict):
+            # Handle dictionary batch (input_ids, labels, etc.)
+            batch_size = list(batch.values())[0].shape[0]
+            
+            for i in range(self.n_microbatches):
+                start_idx = i * self.microbatch_size
+                end_idx = min((i + 1) * self.microbatch_size, batch_size)
+                
+                microbatch = {}
+                for key, tensor in batch.items():
+                    microbatch[key] = tensor[start_idx:end_idx]
+                
+                microbatches.append(microbatch)
+        else:
+            # Handle tensor batch
+            batch_size = batch.shape[0]
+            
+            for i in range(self.n_microbatches):
+                start_idx = i * self.microbatch_size
+                end_idx = min((i + 1) * self.microbatch_size, batch_size)
+                microbatches.append(batch[start_idx:end_idx])
+        
+        return microbatches
     
-    def process_microbatch(self, microbatch, stage_id):
+    def process_microbatch(self, microbatch, stage_id, partition):
         """Process single micro-batch through pipeline stage"""
-        # TODO: Implement micro-batch processing
-        # 1. Forward pass through stage
-        # 2. Store activations for backward pass
-        # 3. Handle communication between stages
-        pass
+        # Forward pass through stage
+        if isinstance(microbatch, dict):
+            # For first stage, use input_ids
+            if stage_id == 0:
+                output = partition(microbatch['input_ids'])
+            else:
+                # For other stages, microbatch is the tensor from previous stage
+                output = partition(microbatch)
+        else:
+            output = partition(microbatch)
+        
+        return output
 
 class PipelineTrainer:
     """Pipeline parallel trainer"""
@@ -251,36 +295,88 @@ class PipelineTrainer:
         self.n_microbatches = n_microbatches
         self.schedule_type = schedule
         
-        # TODO: Initialize pipeline components
-        self.partitioner = None
-        self.scheduler = None
+        # Initialize pipeline components
+        self.partitioner = PipelinePartitioner(model, devices)
+        self.scheduler = PipelineScheduler(n_microbatches, len(devices))
         self.pipeline_model = None
+        self.partitions = None
         
     def setup_pipeline(self):
         """Setup pipeline parallel model"""
-        # TODO: Implement pipeline setup
         # 1. Partition model across devices
-        # 2. Create Pipe model
-        # 3. Setup communication between stages
-        # 4. Initialize optimizers per device
-        pass
+        self.partitions = self.partitioner.create_partitions()
+        
+        # 2. Move partitions to respective devices
+        for i, partition in enumerate(self.partitions):
+            device = self.devices[i]
+            partition = partition.to(device)
+            self.partitions[i] = partition
+            print(f"Partition {i} moved to {device}")
+            
+            # Print partition info
+            param_count = sum(p.numel() for p in partition.parameters())
+            print(f"  Parameters: {param_count:,}")
+        
+        print("Pipeline setup complete!")
     
     def create_pipeline_model(self, chunks=8):
-        """Create pipeline model using torch.distributed.pipeline.sync.Pipe"""
-        # TODO: Implement pipeline model creation
-        # 1. Get model partitions
-        # 2. Create Pipe with proper chunk size
-        # 3. Handle device placement
-        pass
+        """Create pipeline model using manual pipeline implementation"""
+        if self.partitions is None:
+            self.setup_pipeline()
+        
+        # Create simple pipeline execution function
+        def pipeline_forward(input_batch):
+            # Split batch into micro-batches
+            batch_manager = MicroBatchManager(input_batch.shape[0] if not isinstance(input_batch, dict) else list(input_batch.values())[0].shape[0], self.n_microbatches)
+            microbatches = batch_manager.split_batch(input_batch)
+            
+            # Process each micro-batch through pipeline
+            results = []
+            for microbatch in microbatches:
+                current_output = microbatch
+                
+                # Forward through each stage
+                for stage_id, partition in enumerate(self.partitions):
+                    device = self.devices[stage_id]
+                    
+                    # Move input to correct device
+                    if isinstance(current_output, dict):
+                        for key in current_output:
+                            current_output[key] = current_output[key].to(device)
+                    else:
+                        current_output = current_output.to(device)
+                    
+                    # Process through partition
+                    current_output = batch_manager.process_microbatch(current_output, stage_id, partition)
+                
+                results.append(current_output)
+            
+            # Concatenate results
+            return torch.cat(results, dim=0)
+        
+        self.pipeline_model = pipeline_forward
+        return self.pipeline_model
     
     def forward_backward_pipeline(self, batch):
         """Execute forward and backward passes through pipeline"""
-        # TODO: Implement pipeline forward/backward
-        # 1. Split batch into micro-batches
-        # 2. Execute pipeline schedule
-        # 3. Accumulate gradients properly
-        # 4. Synchronize across pipeline stages
-        pass
+        if self.pipeline_model is None:
+            self.create_pipeline_model()
+        
+        # Execute forward pass
+        output = self.pipeline_model(batch)
+        
+        # For demonstration, compute a simple loss
+        if isinstance(batch, dict) and 'labels' in batch:
+            target = batch['labels'].to(output.device)
+            loss = torch.nn.functional.cross_entropy(output.view(-1, output.size(-1)), target.view(-1))
+        else:
+            # Dummy loss for demo
+            loss = torch.mean(output ** 2)
+        
+        # Backward pass
+        loss.backward()
+        
+        return loss.item()
     
     def optimize_memory_usage(self):
         """Optimize memory usage in pipeline"""
