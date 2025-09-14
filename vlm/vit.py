@@ -30,15 +30,19 @@ class MultiHeadAttention(nn.Module):
         self.v = nn.Linear(dim, dim * 3, bias=False)
         self.lm_head = nn.Linear(dim, dim)
     
-    def forward(self, x):
+    def forward(self, x, k=None, v=None):
+        if k is None:
+            k = x
+        if v is None:
+            v = x
         b, seq_len, dim = x.size()
         q = self.q(x).view(b, seq_len, self.heads, self.head_dim).transpose(1, 2)
-        k = self.k(x).view(b, seq_len, self.heads, self.head_dim).transpose(1, 2)
-        v = self.v(x).view(b, seq_len, self.heads, self.head_dim).transpose(1, 2)
+        k = self.k(k).view(b, k.size(1), self.heads, self.head_dim).transpose(1, 2)
+        v = self.v(v).view(b, v.size(1), self.heads, self.head_dim).transpose(1, 2)
         scores = torch.matmul(q, k.transpose(-2, -1)) / (self.head_dim ** 0.5)
         attn = F.softmax(scores, dim=-1)
         out = torch.matmul(attn, v).transpose(1, 2).contiguous().view(b, seq_len, dim)
-        return self.lm_head(out)
+        return self.lm_head(out), attn
 
 class TransformerBlock(nn.Module):
     def __init__(self, dim, heads, depth, mlp_dim, dropout=0.1):
@@ -60,8 +64,29 @@ class TransformerBlock(nn.Module):
         x = x + self.dropout(self.ff(self.norm2(x)))
         return x
 
+class VisualAdapter(nn.Module):
+    def __init__(self, input_dim=1408, output_dim=4096, num_queries=256, num_heads=16):
+        super().__init__()
+        self.num_queries = num_queries
+        self.queries = nn.Parameter(torch.zeros(1, num_queries, input_dim)) #These act as "slots" that will attend to and extract information from the visual features
+        """
+        - Queries: The learnable query vectors
+        - Keys & Values: Visual features from ViT
+        - This allows each query to "look at" all visual patches and extract relevant information
+        """
+        self.attn = MultiHeadAttention(dim=input_dim, heads=num_heads)
+        self.proj = nn.Linear(input_dim, output_dim)
+        self.norm = nn.LayerNorm(output_dim)
+
+    def forward(self, visual_features):
+        queries = self.queries.repeat(visual_features.size(0), 1, 1)
+        attn_output, _ = self.attn(queries, visual_features, visual_features)
+        output = self.proj(attn_output)
+        output = self.norm(output)
+        return output
+
 class ViT(nn.Module):
-    def __init__(self, image_size=224, patch_size=16, channels=3, num_classes=1000, dim=768, depth=12, heads=12, mlp_dim=3072, dropout=0.1):
+    def __init__(self, image_size=224, patch_size=16, channels=3, num_classes=1000, dim=768, depth=12, heads=12, mlp_dim=3072, dropout=0.1, output_dim=1408):
         super(ViT, self).__init__()
         assert image_size % patch_size == 0, "Image dimensions must be divisible by the patch size."
         num_patches = (image_size // patch_size) ** 2
@@ -85,8 +110,9 @@ class ViT(nn.Module):
 
         self.to_cls_token = nn.Identity()
         self.mlp_head = nn.Linear(dim, num_classes)
+        self.output_proj = nn.Linear(dim, output_dim)
         
-    def forward(self, x): # x: image
+    def forward(self, x, return_features=True): # x: image
         b, c, h, w = x.size()
         x = self.to_patch_embedding(x)
         b, n, _ = x.shape
@@ -95,5 +121,7 @@ class ViT(nn.Module):
         x += self.position_embedding[:, :(n+1)]
         x = self.dropout(x)
         x = self.transformer(x)
+        if return_features:
+            return self.output_proj(x)  # Return all patch features for VLM
         x = self.to_cls_token(x[:, 0])
         return self.mlp_head(x)
